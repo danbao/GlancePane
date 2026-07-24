@@ -1,9 +1,15 @@
 import Foundation
 
 struct DisplayConfig: Codable, Equatable {
+    var targetID: String?
     var targetName: String
 
-    static let `default` = DisplayConfig(targetName: "")
+    static let `default` = DisplayConfig(targetID: nil, targetName: "")
+
+    init(targetID: String? = nil, targetName: String) {
+        self.targetID = targetID
+        self.targetName = targetName
+    }
 }
 struct AppearanceConfig: Codable, Equatable {
     var theme: ThemeName

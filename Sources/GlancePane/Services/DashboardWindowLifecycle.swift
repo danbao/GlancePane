@@ -2,6 +2,7 @@ import Foundation
 
 enum DashboardWindowLifecycleEvent {
     case repositionRequested
+    case targetUnavailable
     case sessionResigned
     case sessionBecameActive
     case screensSlept
@@ -45,6 +46,12 @@ struct DashboardWindowLifecycleState {
         case .repositionRequested:
             hasPendingReposition = true
             return presentIfAllowed()
+
+        case .targetUnavailable:
+            hasPendingReposition = true
+            guard isWindowPresented else { return [] }
+            isWindowPresented = false
+            return [.hide]
 
         case .sessionResigned:
             isSessionActive = false

@@ -247,9 +247,14 @@ extension AppConfig {
 
         copy.schemaVersion = AppConfig.default.schemaVersion
 
+        copy.display.targetID = copy.display.targetID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if copy.display.targetID?.isEmpty == true {
+            copy.display.targetID = nil
+        }
         copy.display.targetName = copy.display.targetName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if copy.display.targetName.isEmpty {
-            copy.display.targetName = AppConfig.default.display.targetName
+        if copy.display.targetID == nil, copy.display.targetName.isEmpty {
+            copy.display = .default
         }
 
         copy.pages = copy.pages.normalized()

@@ -30,7 +30,7 @@ GlancePane is a menu bar app, so it does not display a Dock icon while running.
 ## Quick Start
 
 1. Open the GlancePane menu bar icon and choose **Settings…**.
-2. Under **Display & Behavior**, leave the target on **Automatic** to prefer the first secondary display, or choose a specific monitor.
+2. Under **Display & Behavior**, leave the target on **Automatic** to use the smallest secondary display by logical workspace size, or choose a specific monitor. GlancePane stays hidden when that display is unavailable and returns automatically when it reconnects.
 3. Under **Dashboard**, enable, hide, or reorder pages and choose an optional rotation interval.
 
 Use the left mouse button on the dashboard for the previous page and the right mouse button for the next page. Horizontal drags also switch pages. Click navigation can be disabled in Settings.

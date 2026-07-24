@@ -83,7 +83,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func createWindow(with model: DashboardModel) {
-        let screen = displayManager.preferredScreen(named: model.config.display.targetName)
+        let screen: NSScreen?
+        switch displayManager.selectDisplay(config: model.config.display) {
+        case .selected(let selected, _, _):
+            screen = selected
+        case .waiting:
+            screen = nil
+        }
         let content = DashboardView(model: model)
             .frame(minWidth: 640, minHeight: 360)
             .environment(\.colorScheme, .dark)
@@ -107,20 +113,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func positionAndShowWindow() {
         guard let window, let model = dashboardModel else { return }
-        let screen = displayManager.preferredScreen(named: model.config.display.targetName)
-        let target = screen ?? NSScreen.main
-
-        if let target {
-            model.updateDisplay(screen: target, fellBack: screen == nil)
-            window.setFrame(target.frame, display: true)
+        switch displayManager.selectDisplay(config: model.config.display) {
+        case .selected(let screen, let descriptor, let reason):
+            if reason == .legacyName {
+                model.persistResolvedDisplay(descriptor)
+                refreshSettingsWindow()
+            }
+            model.updateDisplay(descriptor)
+            window.setFrame(screen.frame, display: true)
             window.contentView?.frame = NSRect(origin: .zero, size: window.contentLayoutRect.size)
             window.contentView?.needsLayout = true
             updateClickShieldFrame()
+            resumeClickShield()
             window.orderFront(nil)
-            Self.logger.notice("Dashboard window positioned and shown")
-        } else {
-            model.updateDisplayUnavailable()
-            Self.logger.error("No display is available for the dashboard window")
+            Self.logger.notice(
+                "Dashboard shown on \(descriptor.name, privacy: .public) \(descriptor.logicalWidth)x\(descriptor.logicalHeight, privacy: .public) via \(reason.rawValue, privacy: .public)"
+            )
+
+        case .waiting(let reason):
+            model.updateDisplayWaiting(reason)
+            Self.logger.notice("Dashboard waiting for display: \(reason.statusText, privacy: .public)")
+            applyWindowLifecycle(event: .targetUnavailable, reason: reason.statusText)
         }
 
         updateStatusMenu()
@@ -207,7 +220,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .reposition:
                 positionAndShowWindow()
             case .repositionAndShow:
-                resumeClickShield()
                 positionAndShowWindow()
             }
         }

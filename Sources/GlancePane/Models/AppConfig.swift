@@ -107,7 +107,7 @@ struct AppConfig: Codable, Equatable {
     }
 
     static let `default` = AppConfig(
-        schemaVersion: 5,
+        schemaVersion: 6,
         display: .default,
         appearance: .default,
         interaction: .default,
@@ -120,7 +120,7 @@ struct AppConfig: Codable, Equatable {
     )
 
     init(
-        schemaVersion: Int = 5,
+        schemaVersion: Int = 6,
         display: DisplayConfig,
         appearance: AppearanceConfig,
         interaction: InteractionConfig,
@@ -151,6 +151,7 @@ struct AppConfig: Codable, Equatable {
 
         display = try container.decodeIfPresent(DisplayConfig.self, forKey: .display)
             ?? DisplayConfig(
+                targetID: nil,
                 targetName: try container.decodeIfPresent(String.self, forKey: .targetDisplayName)
                     ?? defaults.display.targetName
             )
