@@ -166,15 +166,22 @@ final class DashboardModel: ObservableObject {
         start()
     }
 
-    func updateDisplay(screen: NSScreen, fellBack: Bool) {
-        let descriptor = displayManager.descriptor(for: screen)
-        displaySummary = fellBack
-            ? "Fallback: \(descriptor.summary)"
-            : "Display: \(descriptor.summary)"
+    func updateDisplay(_ descriptor: DisplayDescriptor) {
+        displaySummary = "Display: \(descriptor.summary)"
     }
 
-    func updateDisplayUnavailable() {
-        displaySummary = "No display available"
+    func updateDisplayWaiting(_ reason: DisplayWaitReason) {
+        displaySummary = reason.statusText
+    }
+
+    func persistResolvedDisplay(_ descriptor: DisplayDescriptor) {
+        guard config.display.targetID != descriptor.persistentID
+                || config.display.targetName != descriptor.name else {
+            return
+        }
+        config.display.targetID = descriptor.persistentID
+        config.display.targetName = descriptor.name
+        configStore.save(config)
     }
 
     func handleSystemWake() {

@@ -40,6 +40,18 @@ struct GlancePaneTestRunner {
             TestCase("legacy grouped interaction migrates") {
                 try testLegacyGroupedInteractionMigrates()
             },
+            TestCase("automatic display selects smallest logical secondary") {
+                try testAutomaticDisplaySelectsSmallestLogicalSecondary()
+            },
+            TestCase("automatic display ordering is deterministic") {
+                try testAutomaticDisplayOrderingIsDeterministic()
+            },
+            TestCase("configured display matches stable id") {
+                try testConfiguredDisplayMatchesStableID()
+            },
+            TestCase("legacy display name requires a unique exact match") {
+                try testLegacyDisplayNameRequiresUniqueExactMatch()
+            },
             TestCase("schema v1 enables performance and agents for default pages") {
                 try testSchemaV1EnablesPerformanceForDefaultPages()
             },
@@ -136,6 +148,9 @@ struct GlancePaneTestRunner {
             TestCase("window lifecycle keeps session and screen lock independent") {
                 try testWindowLifecycleSeparatesSessionAndScreenLock()
             },
+            TestCase("window lifecycle waits while target display is unavailable") {
+                try testWindowLifecycleWaitsForTargetDisplay()
+            },
             TestCase("screen lock monitor maps Darwin state values") {
                 try testScreenLockMonitorStateMapping()
             },
@@ -226,7 +241,7 @@ private func testDefaultConfigWritesGroupedSchema() throws {
     let object = try jsonObject(at: store.configURL)
     try expect(object["display"] != nil, "grouped display key should be present")
     try expect(object["pages"] != nil, "grouped pages key should be present")
-    try expectEqual(object["schemaVersion"] as? Int, 5)
+    try expectEqual(object["schemaVersion"] as? Int, 6)
     try expect(object["agents"] != nil, "grouped agents key should be present")
     let agents = object["agents"] as? [String: Any]
     let codex = agents?["codex"] as? [String: Any]
@@ -243,6 +258,7 @@ private func testPrivacySafeDefaultsAndPermissions() throws {
     try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: store.stockCacheURL.path)
     let config = store.load()
 
+    try expectEqual(config.display.targetID, nil)
     try expectEqual(config.display.targetName, "")
     try expectEqual(config.weather.location.name, "")
     try expectEqual(config.weather.location.longitude, nil)
@@ -366,7 +382,7 @@ private func testSchemaV1EnablesPerformanceForDefaultPages() throws {
     )
 
     let config = store.load()
-    try expectEqual(config.schemaVersion, 5)
+    try expectEqual(config.schemaVersion, 6)
     try expectEqual(config.pages.order, DashboardPage.defaultOrder)
     try expect(config.pages.enabled.contains(.performance), "performance should be enabled for an unchanged v1 page set")
     try expect(config.pages.enabled.contains(.agents), "agents should be enabled for an unchanged v1 page set")
@@ -391,7 +407,7 @@ private func testSchemaV2AgentsMigrationPreservesPageChoices() throws {
     )
 
     let migratedDefault = defaultStore.load()
-    try expectEqual(migratedDefault.schemaVersion, 5)
+    try expectEqual(migratedDefault.schemaVersion, 6)
     try expectEqual(migratedDefault.pages.order, DashboardPage.defaultOrder)
     try expect(migratedDefault.pages.enabled.contains(.agents), "unchanged v2 pages should enable agents")
 
@@ -442,7 +458,7 @@ private func testSchemaV3EnablesLowFrequencyThermals() throws {
     )
 
     let config = store.load()
-    try expectEqual(config.schemaVersion, 5)
+    try expectEqual(config.schemaVersion, 6)
     try expect(config.system.enabledGroups.contains(.thermals), "v3 migration should enable thermals")
     try expectEqual(config.system.refreshIntervalsSeconds[.thermals], 10)
     try expectEqual(files(in: directory, prefix: "config.legacy-").count, 1)
@@ -470,6 +486,98 @@ private func testLegacyGroupedInteractionMigrates() throws {
     let interaction = object["interaction"] as? [String: Any]
     try expectEqual(interaction?["clickNavigationEnabled"] as? Bool, true)
     try expect(interaction?["mousePassthrough"] == nil, "legacy interaction key should not be written")
+}
+
+private func testAutomaticDisplaySelectsSmallestLogicalSecondary() throws {
+    let main = makeDisplay(
+        id: "main",
+        displayID: 1,
+        width: 1_728,
+        height: 1_117,
+        scaleFactor: 2,
+        isMain: true
+    )
+    let portable = makeDisplay(
+        id: "portable",
+        displayID: 2,
+        width: 1_280,
+        height: 720,
+        scaleFactor: 1
+    )
+    let retina = makeDisplay(
+        id: "retina",
+        displayID: 3,
+        width: 1_024,
+        height: 768,
+        scaleFactor: 2
+    )
+
+    try expectEqual(
+        DisplaySelector.select(config: .default, from: [main, portable, retina]),
+        .selected(retina, .automaticSmallest)
+    )
+    try expectEqual(
+        DisplaySelector.select(config: .default, from: [main]),
+        .waiting(.secondaryUnavailable)
+    )
+}
+
+private func testAutomaticDisplayOrderingIsDeterministic() throws {
+    let square = makeDisplay(id: "square", displayID: 2, width: 960, height: 960)
+    let widescreenB = makeDisplay(id: "b", displayID: 3, width: 1_280, height: 720)
+    let widescreenA = makeDisplay(id: "a", displayID: 4, width: 1_280, height: 720)
+
+    let expected = DisplaySelectionResult.selected(widescreenA, .automaticSmallest)
+    try expectEqual(
+        DisplaySelector.select(config: .default, from: [widescreenB, square, widescreenA]),
+        expected
+    )
+    try expectEqual(
+        DisplaySelector.select(config: .default, from: [widescreenA, widescreenB, square]),
+        expected
+    )
+}
+
+private func testConfiguredDisplayMatchesStableID() throws {
+    let first = makeDisplay(id: "first", displayID: 2, name: "Portable", width: 1_280, height: 720)
+    let second = makeDisplay(id: "second", displayID: 3, name: "Portable", width: 1_024, height: 600)
+    let config = DisplayConfig(targetID: "first", targetName: "Portable")
+
+    try expectEqual(
+        DisplaySelector.select(config: config, from: [second, first]),
+        .selected(first, .configuredID)
+    )
+    try expectEqual(
+        DisplaySelector.select(config: config, from: [second]),
+        .waiting(.selectedUnavailable)
+    )
+}
+
+private func testLegacyDisplayNameRequiresUniqueExactMatch() throws {
+    let portable = makeDisplay(id: "portable", displayID: 2, name: "Portable", width: 1_280, height: 720)
+    let duplicate = makeDisplay(id: "duplicate", displayID: 3, name: "portable", width: 1_024, height: 600)
+
+    try expectEqual(
+        DisplaySelector.select(
+            config: DisplayConfig(targetName: "PORTABLE"),
+            from: [portable]
+        ),
+        .selected(portable, .legacyName)
+    )
+    try expectEqual(
+        DisplaySelector.select(
+            config: DisplayConfig(targetName: "Port"),
+            from: [portable]
+        ),
+        .waiting(.selectedUnavailable)
+    )
+    try expectEqual(
+        DisplaySelector.select(
+            config: DisplayConfig(targetName: "Portable"),
+            from: [portable, duplicate]
+        ),
+        .waiting(.ambiguousLegacyName)
+    )
 }
 
 private func testLegacyDirectoryFilesCopyWhenMissing() throws {
@@ -1334,6 +1442,19 @@ private func testWindowLifecycleSeparatesSessionAndScreenLock() throws {
     try expectEqual(state.handle(.sessionBecameActive), [])
     try expect(!state.canPresentWindow, "active session must not override screen lock")
     try expectEqual(state.handle(.screenLockChanged(false)), [.repositionAndShow])
+}
+
+private func testWindowLifecycleWaitsForTargetDisplay() throws {
+    var state = DashboardWindowLifecycleState()
+
+    try expectEqual(state.handle(.repositionRequested), [.repositionAndShow])
+    try expectEqual(state.handle(.targetUnavailable), [.hide])
+    try expect(state.hasPendingReposition, "missing target should keep reposition pending")
+    try expect(!state.isWindowPresented, "missing target should not remain presented")
+
+    try expectEqual(state.handle(.targetUnavailable), [])
+    try expectEqual(state.handle(.repositionRequested), [.repositionAndShow])
+    try expectEqual(state.handle(.repositionRequested), [.reposition])
 }
 
 private func testScreenLockMonitorStateMapping() throws {
@@ -2403,6 +2524,25 @@ private func makeQuote(symbol: String, name: String) -> StockQuote {
         marketState: "REGULAR",
         updatedAt: Date(timeIntervalSince1970: 100),
         isCached: false
+    )
+}
+
+private func makeDisplay(
+    id: String,
+    displayID: CGDirectDisplayID,
+    name: String = "Display",
+    width: CGFloat,
+    height: CGFloat,
+    scaleFactor: CGFloat = 1,
+    isMain: Bool = false
+) -> DisplayDescriptor {
+    DisplayDescriptor(
+        persistentID: id,
+        displayID: displayID,
+        name: name,
+        frame: CGRect(x: 0, y: 0, width: width, height: height),
+        scaleFactor: scaleFactor,
+        isMain: isMain
     )
 }
 

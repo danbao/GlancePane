@@ -62,6 +62,37 @@ final class SettingsViewModel: ObservableObject {
         )
     }
 
+    var displaySelectionBinding: Binding<String> {
+        Binding(
+            get: {
+                if let targetID = self.config.display.targetID {
+                    return targetID
+                }
+                return self.config.display.targetName.isEmpty
+                    ? ""
+                    : "legacy:\(self.config.display.targetName)"
+            },
+            set: { selection in
+                self.update { config in
+                    guard !selection.isEmpty else {
+                        config.display = .default
+                        return
+                    }
+                    guard let display = self.displays.first(where: { $0.persistentID == selection }) else {
+                        return
+                    }
+                    config.display.targetID = display.persistentID
+                    config.display.targetName = display.name
+                }
+            }
+        )
+    }
+
+    var unresolvedDisplayLabel: String? {
+        guard config.display.targetID == nil, !config.display.targetName.isEmpty else { return nil }
+        return "Unavailable: \(config.display.targetName)"
+    }
+
     func pageBinding(_ page: DashboardPage) -> Binding<Bool> {
         Binding(
             get: { self.config.pages.enabled.contains(page) },
@@ -405,10 +436,13 @@ private struct BehaviorSettingsView: View {
     var body: some View {
         Form {
             Section("Display") {
-                Picker("Target Display", selection: model.binding(\.display.targetName)) {
-                    Text("Automatic (Prefer Secondary)").tag("")
+                Picker("Target Display", selection: model.displaySelectionBinding) {
+                    Text("Automatic (Smallest Secondary)").tag("")
+                    if let unresolved = model.unresolvedDisplayLabel {
+                        Text(unresolved).tag("legacy:\(model.config.display.targetName)")
+                    }
                     ForEach(model.displays, id: \.id) { display in
-                        Text(display.name).tag(display.name)
+                        Text(display.settingsLabel).tag(display.persistentID)
                     }
                 }
                 Toggle("Click Navigation", isOn: model.binding(\.interaction.clickNavigationEnabled))
