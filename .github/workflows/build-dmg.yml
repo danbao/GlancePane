@@ -1,0 +1,171 @@
+name: CI and DMG
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: glancepane-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Show runner and toolchain
+        run: |
+          sw_vers
+          uname -m
+          swift --version
+          test "$(uname -m)" = "arm64"
+
+      - name: Run lightweight tests
+        run: sh scripts/test.sh
+
+      - name: Audit public tree and screenshots
+        run: sh scripts/audit-public-tree.sh
+
+      - name: Upload UI snapshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: GlancePane-ui-snapshots
+          path: .build/tests/snapshots
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Build debug binary
+        run: sh scripts/build.sh
+
+  package-arm64-dmg:
+    name: Package arm64 DMG
+    runs-on: macos-15
+    needs: test
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Show runner and toolchain
+        run: |
+          sw_vers
+          uname -m
+          swift --version
+          test "$(uname -m)" = "arm64"
+
+      - name: Build app bundle and DMG
+        run: sh scripts/package-dmg.sh
+
+      - name: Verify app distribution
+        run: |
+          sh scripts/verify-distribution.sh ".build/dist/GlancePane.app"
+          test "$(sips -g pixelWidth "Resources/AppIcon/AppIcon-1024.png" | awk '/pixelWidth:/ { print $2 }')" = "1024"
+          test "$(sips -g pixelHeight "Resources/AppIcon/AppIcon-1024.png" | awk '/pixelHeight:/ { print $2 }')" = "1024"
+          test -f ".build/dist/GlancePane-arm64.dmg"
+          test -f ".build/dist/GlancePane-arm64.dmg.sha256"
+
+      - name: Verify DMG contents and checksum
+        run: |
+          hdiutil verify ".build/dist/GlancePane-arm64.dmg"
+          (
+            cd ".build/dist"
+            shasum -a 256 -c "GlancePane-arm64.dmg.sha256"
+          )
+          mkdir -p ".build/dmg-check"
+          hdiutil attach \
+            ".build/dist/GlancePane-arm64.dmg" \
+            -readonly \
+            -nobrowse \
+            -mountpoint ".build/dmg-check"
+          trap 'hdiutil detach ".build/dmg-check" >/dev/null' EXIT
+          test -d ".build/dmg-check/GlancePane.app"
+          test -L ".build/dmg-check/Applications"
+          test -s ".build/dmg-check/GlancePane.app/Contents/Resources/AppIcon.icns"
+          sh scripts/verify-distribution.sh ".build/dmg-check/GlancePane.app"
+          hdiutil detach ".build/dmg-check"
+          trap - EXIT
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: GlancePane-arm64-dmg
+          path: |
+            .build/dist/GlancePane-arm64.dmg
+            .build/dist/GlancePane-arm64.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-15
+    needs: package-arm64-dmg
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: GlancePane-arm64-dmg
+          path: .build/dist
+
+      - name: Verify release checksum
+        run: |
+          (
+            cd ".build/dist"
+            shasum -a 256 -c "GlancePane-arm64.dmg.sha256"
+          )
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          TITLE="GlancePane ${TAG#v}"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" \
+              ".build/dist/GlancePane-arm64.dmg" \
+              ".build/dist/GlancePane-arm64.dmg.sha256" \
+              --clobber \
+              --repo "${GITHUB_REPOSITORY}"
+          else
+            NOTES_FILE=".github/release-notes/${TAG}.md"
+            if [ -f "${NOTES_FILE}" ]; then
+              gh release create "${TAG}" \
+                ".build/dist/GlancePane-arm64.dmg" \
+                ".build/dist/GlancePane-arm64.dmg.sha256" \
+                --title "${TITLE}" \
+                --notes-file "${NOTES_FILE}" \
+                --repo "${GITHUB_REPOSITORY}"
+            else
+              gh release create "${TAG}" \
+                ".build/dist/GlancePane-arm64.dmg" \
+                ".build/dist/GlancePane-arm64.dmg.sha256" \
+                --title "${TITLE}" \
+                --generate-notes \
+                --repo "${GITHUB_REPOSITORY}"
+            fi
+          fi

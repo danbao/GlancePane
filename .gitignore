@@ -1,0 +1,42 @@
+# Swift and Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserdata/
+*.xcuserstate
+*.xccheckout
+
+# Packaged applications
+*.app
+*.dmg
+*.dmg.sha256
+
+# Local configuration and caches
+.glancepane/
+config.json
+config.*.json
+stock-cache.json
+weather-cache.json
+codex-usage-cache.json
+*.pid
+*.log
+
+# Credentials and environment files
+.env
+.env.*
+!.env.example
+*.jwt
+*.pem
+*.p8
+*.key
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*~
+*.swp
+
+# Temporary screenshots and exports
+*.tmp.png
+*.local.png
