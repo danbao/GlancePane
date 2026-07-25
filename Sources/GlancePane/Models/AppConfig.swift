@@ -107,7 +107,7 @@ struct AppConfig: Codable, Equatable {
     }
 
     static let `default` = AppConfig(
-        schemaVersion: 6,
+        schemaVersion: 7,
         display: .default,
         appearance: .default,
         interaction: .default,
@@ -120,7 +120,7 @@ struct AppConfig: Codable, Equatable {
     )
 
     init(
-        schemaVersion: Int = 6,
+        schemaVersion: Int = 7,
         display: DisplayConfig,
         appearance: AppearanceConfig,
         interaction: InteractionConfig,
@@ -249,6 +249,9 @@ struct AppConfig: Codable, Equatable {
                     ?? defaults.weather.refreshIntervalSeconds,
                 qweather: legacyQWeather
             )
+        if schemaVersion < 7 {
+            weather = weather.migratingLegacyWeatherProvider()
+        }
 
         protection = try container.decodeIfPresent(ProtectionConfig.self, forKey: .protection)
             ?? (try container.decodeIfPresent(ProtectionConfig.self, forKey: .burnInProtection) ?? defaults.protection)

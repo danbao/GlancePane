@@ -27,13 +27,14 @@ GlancePane 是一个运行在 macOS 副屏上的原生状态面板，适合 `128
 - **Performance**：CPU 趋势、P/E 核、GPU 和高占用进程。
 - **Agents**：Codex context、token 使用和额度；默认隐藏项目名。
 - **Market**：Yahoo Finance 股票行情，失败时使用本地缓存。
-- **Weather**：QWeather 当前天气、小时预报和分钟级降雨。
+- **Weather**：默认使用 Open-Meteo(免 API Key,只需设置位置);QWeather 可选,支持当前天气、小时预报、分钟级降雨、7 日预报和空气质量(AQI)。
 
 ## 数据与隐私
 
 - 配置目录为 `~/.glancepane/`，目录权限为 `0700`。
 - 配置、缓存、备份和导出的配置文件权限为 `0600`。
 - 不缓存 Codex prompt、response、账号邮箱和完整项目路径。
+- Open-Meteo 无需凭证,请求仅发送配置的坐标。
 - QWeather JWT 在本机生成，只保存在内存中。
 - Weather 页面隐藏后暂停刷新，减少 API 调用。
 
@@ -41,7 +42,9 @@ GlancePane 是一个运行在 macOS 副屏上的原生状态面板，适合 `128
 
 ## 配置天气
 
-天气默认未配置。先在 QWeather 创建 Ed25519 JWT 凭证，然后执行：
+GlancePane 默认使用 **Open-Meteo**,无需账号或 API Key —— 只需在 Settings 中设置位置即可。
+
+**QWeather** 作为备选,适合需要分钟级降雨预报的用户。在 Settings 中切换 provider,然后在 QWeather 创建 Ed25519 JWT 凭证，执行：
 
 ```bash
 mkdir -p "$HOME/.glancepane/qweather"

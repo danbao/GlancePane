@@ -100,6 +100,33 @@ struct GlancePaneTestRunner {
             TestCase("weather icons map common conditions") {
                 try testWeatherIconsMapCommonConditions()
             },
+            TestCase("WMO weather codes map to symbols") {
+                try testWmoWeatherCodesMapToSymbols()
+            },
+            TestCase("open-meteo forecast maps to snapshot") {
+                try await testOpenMeteoForecastMapsToSnapshot()
+            },
+            TestCase("open-meteo needs only location") {
+                try await testOpenMeteoNeedsOnlyLocation()
+            },
+            TestCase("open-meteo partial keeps cached air quality") {
+                try await testOpenMeteoPartialKeepsCachedAirQuality()
+            },
+            TestCase("qweather daily and air quality fetch") {
+                try await testQWeatherDailyAndAirQualityFetch()
+            },
+            TestCase("qweather air quality uses path params") {
+                try await testQWeatherAirQualityUsesPathParams()
+            },
+            TestCase("config defaults to open-meteo provider") {
+                try testConfigDefaultsToOpenMeteoProvider()
+            },
+            TestCase("schema v6 migrates qweather credentials to provider") {
+                try testSchemaV6MigratesQWeatherCredentialsToProvider()
+            },
+            TestCase("AQI value and color mapping") {
+                try testAqiValueAndColorMapping()
+            },
             TestCase("codex usage formats and fills daily history") {
                 try testCodexUsageFormattingAndHistory()
             },
@@ -241,7 +268,7 @@ private func testDefaultConfigWritesGroupedSchema() throws {
     let object = try jsonObject(at: store.configURL)
     try expect(object["display"] != nil, "grouped display key should be present")
     try expect(object["pages"] != nil, "grouped pages key should be present")
-    try expectEqual(object["schemaVersion"] as? Int, 6)
+    try expectEqual(object["schemaVersion"] as? Int, 7)
     try expect(object["agents"] != nil, "grouped agents key should be present")
     let agents = object["agents"] as? [String: Any]
     let codex = agents?["codex"] as? [String: Any]
@@ -382,7 +409,7 @@ private func testSchemaV1EnablesPerformanceForDefaultPages() throws {
     )
 
     let config = store.load()
-    try expectEqual(config.schemaVersion, 6)
+    try expectEqual(config.schemaVersion, 7)
     try expectEqual(config.pages.order, DashboardPage.defaultOrder)
     try expect(config.pages.enabled.contains(.performance), "performance should be enabled for an unchanged v1 page set")
     try expect(config.pages.enabled.contains(.agents), "agents should be enabled for an unchanged v1 page set")
@@ -407,7 +434,7 @@ private func testSchemaV2AgentsMigrationPreservesPageChoices() throws {
     )
 
     let migratedDefault = defaultStore.load()
-    try expectEqual(migratedDefault.schemaVersion, 6)
+    try expectEqual(migratedDefault.schemaVersion, 7)
     try expectEqual(migratedDefault.pages.order, DashboardPage.defaultOrder)
     try expect(migratedDefault.pages.enabled.contains(.agents), "unchanged v2 pages should enable agents")
 
@@ -458,7 +485,7 @@ private func testSchemaV3EnablesLowFrequencyThermals() throws {
     )
 
     let config = store.load()
-    try expectEqual(config.schemaVersion, 6)
+    try expectEqual(config.schemaVersion, 7)
     try expect(config.system.enabledGroups.contains(.thermals), "v3 migration should enable thermals")
     try expectEqual(config.system.refreshIntervalsSeconds[.thermals], 10)
     try expectEqual(files(in: directory, prefix: "config.legacy-").count, 1)
@@ -806,6 +833,7 @@ private func testWeatherFetchReportsMissingSetup() async throws {
     let store = ConfigStore(configDirectoryURL: directory)
     let service = WeatherService(cacheURL: store.weatherCacheURL)
     var config = AppConfig.default
+    config.weather.provider = .qweather
     config.weather.location = WeatherLocationConfig(name: "Sample District", longitude: 120, latitude: 30)
     config.weather.qweather.apiHost = ""
 
@@ -861,6 +889,7 @@ private func testWeatherFetchKeepsPartialCachedData() async throws {
     defer { unsetenv("GLANCEPANE_QWEATHER_JWT") }
 
     var config = AppConfig.default
+    config.weather.provider = .qweather
     config.weather.location = WeatherLocationConfig(name: "Sample District", longitude: 120, latitude: 30)
     config.weather.qweather.apiHost = "https://example.test"
     let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
@@ -890,6 +919,428 @@ private func testWeatherIconsMapCommonConditions() throws {
     try expectEqual(WeatherIconMapper.symbolName(for: nil, condition: "雷阵雨"), "cloud.bolt.rain.fill")
     try expectEqual(WeatherIconMapper.symbolName(for: nil, condition: "多云"), "cloud.fill")
     try expectEqual(WeatherIconMapper.symbolName(for: nil, condition: nil), "questionmark.circle.fill")
+}
+
+private func testWmoWeatherCodesMapToSymbols() throws {
+    // WMO codes via the "wmo:" prefixed icon identifier (Open-Meteo provider)
+    try expectEqual(WeatherIconMapper.symbolName(for: "wmo:0", condition: nil), "sun.max.fill")
+    try expectEqual(WeatherIconMapper.symbolName(for: "wmo:3", condition: nil), "cloud.fill")
+    try expectEqual(WeatherIconMapper.symbolName(for: "wmo:45", condition: nil), "cloud.fog.fill")
+    try expectEqual(WeatherIconMapper.symbolName(for: "wmo:61", condition: nil), "cloud.rain.fill")
+    try expectEqual(WeatherIconMapper.symbolName(for: "wmo:71", condition: nil), "cloud.snow.fill")
+    try expectEqual(WeatherIconMapper.symbolName(for: "wmo:95", condition: nil), "cloud.bolt.rain.fill")
+    // Direct WMO code mapper
+    try expectEqual(WeatherIconMapper.symbolName(wmoCode: 0), "sun.max.fill")
+    try expectEqual(WeatherIconMapper.symbolName(wmoCode: 65), "cloud.heavyrain.fill")
+    // English condition fallback (Open-Meteo conditions are in English)
+    try expectEqual(WeatherIconMapper.symbolName(for: nil, condition: "Clear sky"), "sun.max.fill")
+    try expectEqual(WeatherIconMapper.symbolName(for: nil, condition: "Moderate rain"), "cloud.rain.fill")
+    try expectEqual(WeatherIconMapper.symbolName(for: nil, condition: "Thunderstorm"), "cloud.bolt.rain.fill")
+    try expectEqual(WeatherService.wmoConditionText(0), "Clear sky")
+    try expectEqual(WeatherService.wmoConditionText(61), "Slight rain")
+    try expectEqual(WeatherService.wmoConditionText(95), "Thunderstorm")
+}
+
+private func testConfigDefaultsToOpenMeteoProvider() throws {
+    try expectEqual(AppConfig.default.weather.provider, .openMeteo)
+    try expectEqual(WeatherProvider.openMeteo.attributionPrefix, "OPEN-METEO")
+    try expectEqual(WeatherProvider.qweather.attributionPrefix, "QWEATHER")
+}
+
+private func testSchemaV6MigratesQWeatherCredentialsToProvider() throws {
+    let directory = try makeTestDirectory("weather-provider-migration")
+    let store = ConfigStore(configDirectoryURL: directory)
+    // Schema v6 config with QWeather credentials should preserve .qweather provider
+    // even though the new default is .openMeteo.
+    let legacyJSON = """
+    {
+      "schemaVersion": 6,
+      "weather": {
+        "provider": "qweather",
+        "location": { "name": "Beijing", "longitude": 116.41, "latitude": 39.92 },
+        "refreshIntervalSeconds": 600,
+        "qweather": {
+          "apiHost": "https://abc.qweatherapi.com",
+          "keyID": "test-kid",
+          "projectID": "test-project",
+          "privateKeyPath": "~/.glancepane/qweather/ed25519-private.pem"
+        }
+      }
+    }
+    """
+    try writeString(legacyJSON, to: store.configURL)
+
+    let config = store.load()
+    try expectEqual(config.schemaVersion, 7)
+    try expectEqual(config.weather.provider, .qweather)
+    try expectEqual(config.weather.qweather.apiHost, "https://abc.qweatherapi.com")
+
+    // A fresh config with no QWeather credentials and no explicit provider
+    // should use the new default (openMeteo) and NOT be force-migrated.
+    var freshConfig = AppConfig.default
+    try expectEqual(freshConfig.weather.provider, .openMeteo)
+    freshConfig = freshConfig.normalized()
+    try expectEqual(freshConfig.weather.provider, .openMeteo)
+}
+
+private func testAqiValueAndColorMapping() throws {
+    try expectEqual(WeatherService.usAqiCategory(0), "Good")
+    try expectEqual(WeatherService.usAqiCategory(50), "Good")
+    try expectEqual(WeatherService.usAqiCategory(51), "Moderate")
+    try expectEqual(WeatherService.usAqiCategory(100), "Moderate")
+    try expectEqual(WeatherService.usAqiCategory(150), "Unhealthy for Sensitive")
+    try expectEqual(WeatherService.usAqiCategory(200), "Unhealthy")
+    try expectEqual(WeatherService.usAqiCategory(300), "Very Unhealthy")
+    try expectEqual(WeatherService.usAqiCategory(301), "Hazardous")
+    try expectEqual(WeatherService.usAqiCategory(nil), AirQuality.unknownCategory)
+}
+
+private func testOpenMeteoNeedsOnlyLocation() async throws {
+    let directory = try makeTestDirectory("openmeteo-setup")
+    let store = ConfigStore(configDirectoryURL: directory)
+    let service = WeatherService(cacheURL: store.weatherCacheURL)
+    var config = AppConfig.default
+    // Open-Meteo requires only a location — no apiHost/keyID/projectID.
+    config.weather.location = WeatherLocationConfig(name: "Berlin", longitude: 13.41, latitude: 52.52)
+
+    let client = MockHTTPClient { request in
+        // Any Open-Meteo endpoint returns valid data so the fetch succeeds.
+        try httpResponse(
+            for: request,
+            json: """
+            {
+              "current": {
+                "time": "2026-07-25T10:00",
+                "temperature_2m": 18.5,
+                "relative_humidity_2m": 62,
+                "apparent_temperature": 17.8,
+                "weather_code": 3,
+                "wind_speed_10m": 12.3,
+                "wind_direction_10m": 180,
+                "precipitation": 0.0
+              },
+              "daily": {
+                "time": ["2026-07-25"],
+                "weather_code": [3],
+                "temperature_2m_max": [25.4],
+                "temperature_2m_min": [13.0],
+                "precipitation_probability_max": [10],
+                "precipitation_sum": [0.0]
+              }
+            }
+            """
+        )
+    }
+
+    let serviceWithClient = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+    let result = await serviceWithClient.fetch(config: config)
+
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(snapshot.provider, .openMeteo)
+        try expect(snapshot.current != nil, "Open-Meteo should produce current weather")
+    case .failure(let error):
+        throw TestFailure(message: "Open-Meteo should succeed with location only, got \(error)", file: #fileID, line: #line)
+    }
+
+    // Sanity: the no-client service should not report a setupRequired for missing
+    // apiHost (the QWeather-specific gate). It may fail with network, but not setup.
+    _ = service
+}
+
+private func testOpenMeteoForecastMapsToSnapshot() async throws {
+    let directory = try makeTestDirectory("openmeteo-forecast")
+    let store = ConfigStore(configDirectoryURL: directory)
+    var config = AppConfig.default
+    config.weather.location = WeatherLocationConfig(name: "", longitude: 13.41, latitude: 52.52)
+
+    let client = MockHTTPClient { request in
+        switch request.url?.host {
+        case "api.open-meteo.com":
+            return try httpResponse(
+                for: request,
+                json: """
+                {
+                  "current": {
+                    "time": "2026-07-25T10:00",
+                    "temperature_2m": 18.5,
+                    "relative_humidity_2m": 62,
+                    "apparent_temperature": 17.8,
+                    "weather_code": 0,
+                    "wind_speed_10m": 12.3,
+                    "wind_direction_10m": 180,
+                    "precipitation": 0.0
+                  },
+                  "hourly": {
+                    "time": ["2026-07-25T10:00", "2026-07-25T11:00"],
+                    "temperature_2m": [18.5, 19.0],
+                    "weather_code": [0, 1],
+                    "precipitation_probability": [10, 20],
+                    "precipitation": [0.0, 0.1]
+                  },
+                  "daily": {
+                    "time": ["2026-07-25", "2026-07-26"],
+                    "weather_code": [0, 61],
+                    "temperature_2m_max": [25.4, 22.0],
+                    "temperature_2m_min": [13.0, 14.0],
+                    "precipitation_probability_max": [10, 80],
+                    "precipitation_sum": [0.0, 2.5]
+                  }
+                }
+                """
+            )
+        case "air-quality-api.open-meteo.com":
+            return try httpResponse(
+                for: request,
+                json: """
+                {
+                  "current": {
+                    "us_aqi": 46,
+                    "pm2_5": 5.4,
+                    "pm10": 11.0,
+                    "ozone": 45.3,
+                    "nitrogen_dioxide": 8.2
+                  }
+                }
+                """
+            )
+        default:
+            throw URLError(.badURL)
+        }
+    }
+
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+    let result = await service.fetch(config: config)
+
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(snapshot.provider, .openMeteo)
+        try expectEqual(snapshot.current?.temperatureCelsius, 18.5)
+        try expectEqual(snapshot.current?.condition, "Clear sky")
+        try expectEqual(snapshot.current?.icon, "wmo:0")
+        try expectEqual(snapshot.hourly.count, 2)
+        try expectEqual(snapshot.hourly.first?.condition, "Clear sky")
+        try expectEqual(snapshot.daily.count, 2)
+        try expectEqual(snapshot.daily.first?.tempMax, 25.4)
+        try expectEqual(snapshot.daily.last?.condition, "Slight rain")
+        try expectEqual(snapshot.daily.last?.precipitationProbabilityPercent, 80)
+        try expect(snapshot.minutely.isEmpty, "Open-Meteo has no minutely endpoint")
+        try expectEqual(snapshot.airQuality?.aqi, 46)
+        try expectEqual(snapshot.airQuality?.category, "Good")
+        try expectEqual(snapshot.airQuality?.pm25, 5.4)
+    case .failure(let error):
+        throw TestFailure(message: "Open-Meteo forecast should succeed, got \(error)", file: #fileID, line: #line)
+    }
+}
+
+private func testOpenMeteoPartialKeepsCachedAirQuality() async throws {
+    let directory = try makeTestDirectory("openmeteo-partial")
+    let store = ConfigStore(configDirectoryURL: directory)
+
+    // Seed a cached snapshot with air quality data.
+    var cached = makeWeatherSnapshot()
+    cached = WeatherSnapshot(
+        provider: .openMeteo,
+        locationName: cached.locationName,
+        locationID: cached.locationID,
+        longitude: 13.41,
+        latitude: 52.52,
+        current: cached.current,
+        hourly: cached.hourly,
+        daily: cached.daily,
+        minutely: [],
+        precipitationSummary: "No minute rain data",
+        airQuality: AirQuality(aqi: 42, category: "Good", primaryPollutantName: "PM2.5", pm25: 10, pm10: 18, ozone: 45, nitrogenDioxide: 8),
+        attributionURL: "https://open-meteo.com/",
+        updatedAt: Date(),
+        isCached: false,
+        errorMessage: nil
+    )
+    try writeJSON(cached, to: store.weatherCacheURL)
+
+    var config = AppConfig.default
+    config.weather.location = WeatherLocationConfig(name: "", longitude: 13.41, latitude: 52.52)
+
+    let client = MockHTTPClient { request in
+        switch request.url?.host {
+        case "api.open-meteo.com":
+            return try httpResponse(
+                for: request,
+                json: """
+                {
+                  "current": {
+                    "time": "2026-07-25T10:00",
+                    "temperature_2m": 20.0,
+                    "weather_code": 1
+                  },
+                  "daily": {
+                    "time": ["2026-07-25"],
+                    "weather_code": [1],
+                    "temperature_2m_max": [24.0],
+                    "temperature_2m_min": [14.0]
+                  }
+                }
+                """
+            )
+        case "air-quality-api.open-meteo.com":
+            // Air quality fails — should fall back to cached air quality.
+            throw URLError(.timedOut)
+        default:
+            throw URLError(.badURL)
+        }
+    }
+
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+    let result = await service.fetch(config: config)
+
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(snapshot.current?.temperatureCelsius, 20.0)
+        try expectEqual(snapshot.airQuality?.aqi, 42)
+        try expect(snapshot.errorMessage != nil, "partial snapshot should retain the air quality error")
+    case .failure(let error):
+        throw TestFailure(message: "Open-Meteo partial should succeed with cached AQI, got \(error)", file: #fileID, line: #line)
+    }
+}
+
+private func testQWeatherDailyAndAirQualityFetch() async throws {
+    let directory = try makeTestDirectory("qweather-daily-aqi")
+    let store = ConfigStore(configDirectoryURL: directory)
+
+    setenv("GLANCEPANE_QWEATHER_JWT", "test-token", 1)
+    defer { unsetenv("GLANCEPANE_QWEATHER_JWT") }
+
+    var config = AppConfig.default
+    config.weather.provider = .qweather
+    config.weather.location = WeatherLocationConfig(name: "", longitude: 116.41, latitude: 39.92)
+    config.weather.qweather.apiHost = "https://example.test"
+
+    let client = MockHTTPClient { request in
+        switch request.url?.path {
+        case "/v7/weather/now":
+            return try httpResponse(for: request, json: "{\"code\":\"200\",\"now\":{\"temp\":\"28\",\"text\":\"多云\",\"icon\":\"101\"},\"fxLink\":\"https://www.qweather.com\"}")
+        case "/v7/weather/24h":
+            return try httpResponse(for: request, json: "{\"code\":\"200\",\"hourly\":[],\"fxLink\":\"https://www.qweather.com\"}")
+        case "/v7/weather/7d":
+            return try httpResponse(
+                for: request,
+                json: """
+                {
+                  "code": "200",
+                  "fxLink": "https://www.qweather.com",
+                  "daily": [
+                    {
+                      "fxDate": "2026-07-25",
+                      "tempMax": "31",
+                      "tempMin": "24",
+                      "iconDay": "100",
+                      "textDay": "晴",
+                      "precip": "0.0"
+                    },
+                    {
+                      "fxDate": "2026-07-26",
+                      "tempMax": "29",
+                      "tempMin": "23",
+                      "iconDay": "305",
+                      "textDay": "小雨",
+                      "precip": "5.2"
+                    }
+                  ]
+                }
+                """
+            )
+        case "/v7/minutely/5m":
+            return try httpResponse(for: request, json: "{\"code\":\"204\"}")
+        default:
+            // Air quality v1 endpoint — path contains /airquality/v1/current/
+            if (request.url?.path.contains("/airquality/v1/current/")) == true {
+                return try httpResponse(
+                    for: request,
+                    json: """
+                    {
+                      "indexes": [
+                        {
+                          "code": "us-epa",
+                          "name": "AQI (US)",
+                          "aqi": 46,
+                          "category": "Good",
+                          "primaryPollutant": { "code": "pm2p5", "name": "PM 2.5" }
+                        }
+                      ],
+                      "pollutants": [
+                        { "code": "pm2p5", "name": "PM 2.5", "concentration": { "value": 11.0, "unit": "μg/m3" } },
+                        { "code": "pm10", "name": "PM 10", "concentration": { "value": 18.0, "unit": "μg/m3" } }
+                      ]
+                    }
+                    """
+                )
+            }
+            throw URLError(.badURL)
+        }
+    }
+
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+    let result = await service.fetch(config: config)
+
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(snapshot.provider, .qweather)
+        try expectEqual(snapshot.current?.condition, "多云")
+        try expectEqual(snapshot.daily.count, 2)
+        try expectEqual(snapshot.daily.first?.tempMax, 31)
+        try expectEqual(snapshot.daily.last?.condition, "小雨")
+        try expectEqual(snapshot.daily.last?.precipitationMillimeters, 5.2)
+        try expectEqual(snapshot.airQuality?.aqi, 46)
+        try expectEqual(snapshot.airQuality?.category, "Good")
+        try expectEqual(snapshot.airQuality?.primaryPollutantName, "PM 2.5")
+        try expectEqual(snapshot.airQuality?.pm25, 11.0)
+        try expectEqual(snapshot.airQuality?.pm10, 18.0)
+    case .failure(let error):
+        throw TestFailure(message: "QWeather daily+AQI should succeed, got \(error)", file: #fileID, line: #line)
+    }
+}
+
+private func testQWeatherAirQualityUsesPathParams() async throws {
+    let directory = try makeTestDirectory("qweather-aqi-path")
+    let store = ConfigStore(configDirectoryURL: directory)
+
+    setenv("GLANCEPANE_QWEATHER_JWT", "test-token", 1)
+    defer { unsetenv("GLANCEPANE_QWEATHER_JWT") }
+
+    var config = AppConfig.default
+    config.weather.provider = .qweather
+    config.weather.location = WeatherLocationConfig(name: "", longitude: 116.41, latitude: 39.92)
+    config.weather.qweather.apiHost = "https://example.test"
+
+    var capturedPath: String?
+    let client = MockHTTPClient { request in
+        let path = request.url?.path ?? ""
+        if path.contains("/airquality/v1/current/") {
+            capturedPath = path
+            return try httpResponse(
+                for: request,
+                json: """
+                {
+                  "indexes": [
+                    { "code": "us-epa", "aqi": 46, "category": "Good" }
+                  ]
+                }
+                """
+            )
+        }
+        // Other endpoints return empty/minimal success.
+        return try httpResponse(for: request, json: "{\"code\":\"200\"}")
+    }
+
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+    _ = await service.fetch(config: config)
+
+    guard let path = capturedPath else {
+        throw TestFailure(message: "air quality request should have been made", file: #fileID, line: #line)
+    }
+    // The lat/lon should be embedded in the path, not as query params.
+    try expect(path.contains("/airquality/v1/current/39.92/116.41"), "AQI path should embed lat/lon: \(path)")
+    try expect(!path.contains("location="), "AQI path should not use location query param")
 }
 
 private func testCodexUsageFormattingAndHistory() throws {
@@ -2654,13 +3105,38 @@ private func makeWeatherSnapshot() -> WeatherSnapshot {
             precipitationMillimeters: 0
         ),
         hourly: hourly,
+        daily: makeDailyForecast(),
         minutely: minutely,
         precipitationSummary: "Rain soon",
+        airQuality: AirQuality(
+            aqi: 42,
+            category: "Good",
+            primaryPollutantName: "PM2.5",
+            pm25: 11,
+            pm10: 18,
+            ozone: 45,
+            nitrogenDioxide: 8
+        ),
         attributionURL: "https://www.qweather.com",
         updatedAt: Date(timeIntervalSince1970: 400),
         isCached: false,
         errorMessage: nil
     )
+}
+
+private func makeDailyForecast() -> [DailyWeather] {
+    let conditions = [("晴", "100"), ("多云", "101"), ("小雨", "305"), ("阵雨", "300")]
+    return (0..<7).map { index in
+        DailyWeather(
+            date: Date().addingTimeInterval(Double(index * 86_400)),
+            tempMax: 30 - Double(index % 3),
+            tempMin: 22 - Double(index % 4),
+            condition: conditions[index % conditions.count].0,
+            icon: conditions[index % conditions.count].1,
+            precipitationProbabilityPercent: index.isMultiple(of: 2) ? 60 : 10,
+            precipitationMillimeters: index.isMultiple(of: 2) ? 0.5 : 0
+        )
+    }
 }
 
 private func makeDryWeatherSnapshot() -> WeatherSnapshot {
@@ -2682,8 +3158,10 @@ private func makeDryWeatherSnapshot() -> WeatherSnapshot {
         latitude: base.latitude,
         current: base.current,
         hourly: base.hourly,
+        daily: base.daily,
         minutely: minutely,
         precipitationSummary: "未来两小时无降水",
+        airQuality: base.airQuality,
         attributionURL: base.attributionURL,
         updatedAt: Date(),
         isCached: false,

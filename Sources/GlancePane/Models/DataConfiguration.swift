@@ -137,7 +137,7 @@ struct WeatherConfig: Codable, Equatable {
     var qweather: QWeatherConfig
 
     static let `default` = WeatherConfig(
-        provider: .qweather,
+        provider: .openMeteo,
         location: .default,
         refreshIntervalSeconds: 600,
         qweather: .default
@@ -150,6 +150,20 @@ struct WeatherConfig: Codable, Equatable {
         if !copy.refreshIntervalSeconds.isFinite || copy.refreshIntervalSeconds < 60 {
             copy.refreshIntervalSeconds = Self.default.refreshIntervalSeconds
         }
+        return copy
+    }
+
+    /// Schema v7 migration: the default provider changed from QWeather to Open-Meteo.
+    /// Preserve QWeather for existing users who have configured QWeather credentials,
+    /// so the default change does not silently switch their data source.
+    func migratingLegacyWeatherProvider() -> WeatherConfig {
+        guard provider == .openMeteo else { return self }
+        let host = qweather.apiHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keyID = qweather.keyID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let projectID = qweather.projectID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty, !keyID.isEmpty, !projectID.isEmpty else { return self }
+        var copy = self
+        copy.provider = .qweather
         return copy
     }
 }
@@ -215,5 +229,13 @@ struct QWeatherConfig: Codable, Equatable {
 }
 
 enum WeatherProvider: String, Codable, CaseIterable, Equatable {
+    case openMeteo
     case qweather
+
+    var attributionPrefix: String {
+        switch self {
+        case .openMeteo: return "OPEN-METEO"
+        case .qweather: return "QWEATHER"
+        }
+    }
 }
