@@ -40,7 +40,7 @@ Tests and screenshots use temporary dirs, synthetic HTTP responses, and offscree
 - **Layering**: `Models` → `Services` → `Views`. Views observe `DashboardModel`; services do not import view code. `DashboardModel` is the single `@MainActor` bridge between background services and the SwiftUI views.
 - **Dependency injection for tests**: networking and platform access go through protocols (`HTTPClient`, `ThermalCollecting`, `NetworkProbing`, `LoginItemManaging`, …). Keep them injectable so the test runner can substitute fakes — there is no XCTest mock framework in use.
 - **Background work**: use `Task`/`Task<Void, Never>` stored on the model, with per-feed **generation counters** (`stockRequestGeneration`, `weatherRequestGeneration`, …) to ignore stale results. Don't block the main thread.
-- **Config schema migrations**: `AppConfig.schemaVersion` (currently `6`). On decode, `init(from:)` migrates from older versions and bumps the version; add a new branch and increment `schemaVersion` rather than rewriting stored shapes. Tests cover each migration step — add one when you bump the version.
+- **Config schema migrations**: `AppConfig.schemaVersion` (currently `7`). On decode, `init(from:)` migrates from older versions and bumps the version; add a new branch and increment `schemaVersion` rather than rewriting stored shapes. Tests cover each migration step — add one when you bump the version.
 
 ## Conventions
 

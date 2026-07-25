@@ -55,7 +55,7 @@ GlancePane displays memory pressure, storage, network activity, power, thermal s
 
 - **Agents** reads account usage from the local Codex app-server and context metadata from local session files. Project names are hidden by default.
 - **Market** shows up to eight Yahoo Finance symbols with per-symbol cache fallback.
-- **Weather** supports QWeather current conditions, hourly forecasts, and minute-level precipitation.
+- **Weather** supports two providers. Open-Meteo is the default and works with just a location — no API key required. QWeather remains available for current conditions, hourly forecasts, minute-level precipitation, 7-day forecasts, and air quality (AQI).
 
 All screenshots in this README are rendered from deterministic synthetic fixtures. They contain no real account, project, network, device, or location data.
 
@@ -68,7 +68,7 @@ The native Settings window manages:
 - themes, temperature units, and data-rate units;
 - display selection, click navigation, and burn-in protection;
 - Codex privacy and executable discovery;
-- market symbols and QWeather credentials;
+- weather provider selection (Open-Meteo or QWeather), market symbols, and QWeather credentials;
 - configuration import, export, and reset.
 
 Configuration and caches live in `~/.glancepane/`. The directory is created with mode `0700`; configuration, cache, backup, and exported configuration files use mode `0600`.
@@ -83,14 +83,17 @@ GlancePane runs locally and does not operate a telemetry service.
 - Codex prompts, responses, account email, and full project paths are not cached.
 - Codex project names are hidden unless explicitly enabled.
 - QWeather JWTs are generated locally from your private key and cached only in memory.
-- Yahoo Finance and QWeather receive only the requests needed for their enabled pages.
+- Open-Meteo requires no credentials; requests send only the configured coordinates.
+- Yahoo Finance and the active weather provider receive only the requests needed for their enabled pages.
 - The Weather page pauses network refreshes when hidden.
 
 See [PRIVACY.md](PRIVACY.md) for data paths and service boundaries.
 
-## QWeather
+## Weather Providers
 
-Weather is unconfigured by default. Create an Ed25519 credential in QWeather, then generate a local key pair:
+GlancePane defaults to **Open-Meteo**, a free weather API that requires no account or API key — just set a location in Settings and the Weather page works out of the box. Open-Meteo provides current conditions, hourly and 7-day forecasts, and air quality (AQI).
+
+**QWeather** is available as an alternative for users who need minute-level precipitation nowcasting. To use QWeather, switch the provider in Settings and create an Ed25519 credential, then generate a local key pair:
 
 ```bash
 mkdir -p "$HOME/.glancepane/qweather"
