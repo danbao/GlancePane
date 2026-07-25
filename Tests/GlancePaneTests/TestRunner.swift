@@ -3061,16 +3061,20 @@ private func makeCodexSession(
 }
 
 private func makeWeatherSnapshot() -> WeatherSnapshot {
-    let hourly: [HourlyWeather] = (0..<12).map { index in
-        let conditions = [("晴", "100"), ("多云", "101"), ("小雨", "305")]
-        let condition = conditions[index % conditions.count]
-        return HourlyWeather(
-            forecastAt: Date(timeIntervalSince1970: 200 + Double(index * 3_600)),
-            temperatureCelsius: 29 - Double(index % 4),
-            condition: condition.0,
-            icon: condition.1,
-            precipitationProbabilityPercent: index.isMultiple(of: 3) ? 60 : 15,
-            precipitationMillimeters: index.isMultiple(of: 3) ? 0.4 : 0
+    let hourlyConditions: [(String, String)] = [("晴", "100"), ("多云", "101"), ("小雨", "305")]
+    var hourly: [HourlyWeather] = []
+    hourly.reserveCapacity(12)
+    for index in 0..<12 {
+        let condition = hourlyConditions[index % hourlyConditions.count]
+        hourly.append(
+            HourlyWeather(
+                forecastAt: Date(timeIntervalSince1970: 200 + Double(index * 3_600)),
+                temperatureCelsius: 29 - Double(index % 4),
+                condition: condition.0,
+                icon: condition.1,
+                precipitationProbabilityPercent: index.isMultiple(of: 3) ? 60 : 15,
+                precipitationMillimeters: index.isMultiple(of: 3) ? 0.4 : 0
+            )
         )
     }
     let rainStart = Date().addingTimeInterval(600)
@@ -3125,18 +3129,24 @@ private func makeWeatherSnapshot() -> WeatherSnapshot {
 }
 
 private func makeDailyForecast() -> [DailyWeather] {
-    let conditions = [("晴", "100"), ("多云", "101"), ("小雨", "305"), ("阵雨", "300")]
-    return (0..<7).map { index in
-        DailyWeather(
-            date: Date().addingTimeInterval(Double(index * 86_400)),
-            tempMax: 30 - Double(index % 3),
-            tempMin: 22 - Double(index % 4),
-            condition: conditions[index % conditions.count].0,
-            icon: conditions[index % conditions.count].1,
-            precipitationProbabilityPercent: index.isMultiple(of: 2) ? 60 : 10,
-            precipitationMillimeters: index.isMultiple(of: 2) ? 0.5 : 0
+    let conditions: [(String, String)] = [("晴", "100"), ("多云", "101"), ("小雨", "305"), ("阵雨", "300")]
+    var forecast: [DailyWeather] = []
+    forecast.reserveCapacity(7)
+    for index in 0..<7 {
+        let pair = conditions[index % conditions.count]
+        forecast.append(
+            DailyWeather(
+                date: Date().addingTimeInterval(Double(index * 86_400)),
+                tempMax: 30 - Double(index % 3),
+                tempMin: 22 - Double(index % 4),
+                condition: pair.0,
+                icon: pair.1,
+                precipitationProbabilityPercent: index.isMultiple(of: 2) ? 60 : 10,
+                precipitationMillimeters: index.isMultiple(of: 2) ? 0.5 : 0
+            )
         )
     }
+    return forecast
 }
 
 private func makeDryWeatherSnapshot() -> WeatherSnapshot {
