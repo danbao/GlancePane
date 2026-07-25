@@ -33,13 +33,19 @@ final class WeatherService {
     }
 
     func fetch(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
-        guard config.weather.provider == .qweather else {
-            return .failure(.setupRequired("Unsupported weather provider"))
-        }
         guard config.weather.location.isConfigured else {
             return .failure(.setupRequired("Set a weather location in GlancePane Settings"))
         }
 
+        switch config.weather.provider {
+        case .qweather:
+            return await fetchQWeather(config: config)
+        case .openMeteo:
+            return await fetchOpenMeteo(config: config)
+        }
+    }
+
+    private func fetchQWeather(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
         let apiHost = config.weather.qweather.apiHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !apiHost.isEmpty else {
             return .failure(.setupRequired("Set weather.qweather.apiHost in ~/.glancepane/config.json"))
@@ -93,8 +99,10 @@ final class WeatherService {
     ) async throws -> WeatherSnapshot {
         var current = cached?.current
         var hourly = cached?.hourly ?? []
+        var daily = cached?.daily ?? []
         var minutely = cached?.minutely ?? []
         var summary = cached?.precipitationSummary ?? "No minute rain data"
+        var airQuality = cached?.airQuality
         var attributionURL = cached?.attributionURL
         var errors: [Error] = []
 
@@ -115,6 +123,14 @@ final class WeatherService {
         }
 
         do {
+            let result = try await fetchDaily(apiHost: apiHost, jwt: jwt, location: location.weatherQuery)
+            daily = result.daily
+            attributionURL = result.attributionURL ?? attributionURL
+        } catch {
+            errors.append(error)
+        }
+
+        do {
             let result = try await fetchMinutely(apiHost: apiHost, jwt: jwt, location: location.coordinateQuery)
             minutely = result.minutely
             summary = result.summary
@@ -126,7 +142,18 @@ final class WeatherService {
             errors.append(error)
         }
 
-        guard current != nil || !hourly.isEmpty || !minutely.isEmpty else {
+        do {
+            airQuality = try await fetchAirQuality(
+                apiHost: apiHost,
+                jwt: jwt,
+                longitude: location.longitude,
+                latitude: location.latitude
+            )
+        } catch {
+            errors.append(error)
+        }
+
+        guard current != nil || !hourly.isEmpty || !minutely.isEmpty || !daily.isEmpty || airQuality != nil else {
             throw errors.first ?? WeatherServiceError.emptyResponse
         }
 
@@ -138,12 +165,330 @@ final class WeatherService {
             latitude: location.latitude,
             current: current,
             hourly: hourly,
+            daily: daily,
             minutely: minutely,
             precipitationSummary: summary,
+            airQuality: airQuality,
             attributionURL: attributionURL,
             updatedAt: Date(),
             isCached: false,
             errorMessage: errors.first?.localizedDescription
+        )
+    }
+
+    private func fetchOpenMeteo(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
+        let cached = loadCached()
+        guard let location = await resolveOpenMeteoLocation(config: config, cached: cached) else {
+            return .failure(.setupRequired("Set a valid weather name or coordinates in GlancePane Settings"))
+        }
+
+        do {
+            let snapshot = try await fetchOpenMeteoSnapshot(
+                config: config,
+                location: location,
+                cached: cached
+            )
+            writeCache(snapshot)
+            return .success(snapshot)
+        } catch {
+            if var cached {
+                cached.errorMessage = error.localizedDescription
+                cached.isCached = true
+                return .failure(.usingCache(cached, error.localizedDescription))
+            }
+            return .failure(.network(error.localizedDescription))
+        }
+    }
+
+    private func fetchOpenMeteoSnapshot(
+        config: AppConfig,
+        location: ResolvedWeatherLocation,
+        cached: WeatherSnapshot?
+    ) async throws -> WeatherSnapshot {
+        var current = cached?.current
+        var hourly = cached?.hourly ?? []
+        var daily = cached?.daily ?? []
+        var airQuality = cached?.airQuality
+        var errors: [Error] = []
+        let attributionURL = cached?.attributionURL ?? Self.openMeteoAttributionURL
+
+        do {
+            let result = try await fetchOpenMeteoForecast(longitude: location.longitude, latitude: location.latitude)
+            current = result.current
+            hourly = result.hourly
+            daily = result.daily
+        } catch {
+            errors.append(error)
+        }
+
+        do {
+            airQuality = try await fetchOpenMeteoAirQuality(longitude: location.longitude, latitude: location.latitude)
+        } catch {
+            errors.append(error)
+        }
+
+        guard current != nil || !hourly.isEmpty || !daily.isEmpty || airQuality != nil else {
+            throw errors.first ?? WeatherServiceError.emptyResponse
+        }
+
+        return WeatherSnapshot(
+            provider: .openMeteo,
+            locationName: location.name,
+            locationID: location.id,
+            longitude: location.longitude,
+            latitude: location.latitude,
+            current: current,
+            hourly: hourly,
+            daily: daily,
+            minutely: [],
+            precipitationSummary: "No minute rain data",
+            airQuality: airQuality,
+            attributionURL: attributionURL,
+            updatedAt: Date(),
+            isCached: false,
+            errorMessage: errors.first?.localizedDescription
+        )
+    }
+
+    private func resolveOpenMeteoLocation(
+        config: AppConfig,
+        cached: WeatherSnapshot?
+    ) async -> ResolvedWeatherLocation? {
+        let configuredName = config.weather.location.name
+        if let cached,
+           (!configuredName.isEmpty && cached.locationName == configuredName)
+            || coordinatesMatch(cached: cached, config: config.weather.location),
+           cached.longitude.isFinite,
+           cached.latitude.isFinite {
+            return ResolvedWeatherLocation(
+                name: cached.locationName,
+                id: cached.locationID,
+                longitude: cached.longitude,
+                latitude: cached.latitude
+            )
+        }
+
+        if !configuredName.isEmpty {
+            do {
+                let response = try await requestUnauthed(
+                    OpenMeteoGeoResponse.self,
+                    host: Self.openMeteoGeocodingHost,
+                    path: "/v1/search",
+                    queryItems: [
+                        URLQueryItem(name: "name", value: configuredName),
+                        URLQueryItem(name: "count", value: "5"),
+                        URLQueryItem(name: "language", value: "en"),
+                        URLQueryItem(name: "format", value: "json")
+                    ]
+                )
+
+                if let item = response.results?.first,
+                   item.latitude.isFinite,
+                   item.longitude.isFinite {
+                    return ResolvedWeatherLocation(
+                        name: item.name ?? configuredName,
+                        id: item.id.map(String.init),
+                        longitude: item.longitude,
+                        latitude: item.latitude
+                    )
+                }
+            } catch {
+                NSLog("GlancePane Open-Meteo location lookup fallback: \(error)")
+            }
+        }
+
+        guard let longitude = config.weather.location.longitude,
+              let latitude = config.weather.location.latitude else {
+            return nil
+        }
+        return ResolvedWeatherLocation(
+            name: configuredName.isEmpty ? "Configured Location" : configuredName,
+            id: nil,
+            longitude: longitude,
+            latitude: latitude
+        )
+    }
+
+    private func fetchOpenMeteoForecast(
+        longitude: Double,
+        latitude: Double
+    ) async throws -> (current: CurrentWeather?, hourly: [HourlyWeather], daily: [DailyWeather]) {
+        let response = try await requestUnauthed(
+            OpenMeteoForecastResponse.self,
+            host: Self.openMeteoForecastHost,
+            path: "/v1/forecast",
+            queryItems: [
+                URLQueryItem(name: "latitude", value: String(latitude)),
+                URLQueryItem(name: "longitude", value: String(longitude)),
+                URLQueryItem(name: "current", value: "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m,precipitation"),
+                URLQueryItem(name: "hourly", value: "temperature_2m,weather_code,precipitation_probability,precipitation"),
+                URLQueryItem(name: "daily", value: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum"),
+                URLQueryItem(name: "forecast_days", value: "7"),
+                URLQueryItem(name: "timezone", value: "auto")
+            ]
+        )
+
+        let current: CurrentWeather?
+        if let currentData = response.current {
+            current = CurrentWeather(
+                observedAt: Self.openMeteoDateValue(currentData.time),
+                temperatureCelsius: currentData.temperature_2m,
+                feelsLikeCelsius: currentData.apparent_temperature,
+                condition: Self.wmoConditionText(currentData.weather_code),
+                icon: Self.weatherCodeIcon(currentData.weather_code),
+                humidityPercent: currentData.relative_humidity_2m,
+                windDirection: Self.windDirectionText(currentData.wind_direction_10m),
+                windSpeedKph: currentData.wind_speed_10m,
+                precipitationMillimeters: currentData.precipitation
+            )
+        } else {
+            current = nil
+        }
+
+        let hourly: [HourlyWeather]
+        if let hourlyData = response.hourly {
+            let times = hourlyData.time ?? []
+            var built: [HourlyWeather] = []
+            built.reserveCapacity(times.count)
+            for index in times.indices {
+                guard let forecastAt = Self.openMeteoDateValue(times[index]) else { continue }
+                built.append(HourlyWeather(
+                    forecastAt: forecastAt,
+                    temperatureCelsius: hourlyData.temperature_2m?[index],
+                    condition: Self.wmoConditionText(hourlyData.weather_code?[index]),
+                    icon: Self.weatherCodeIcon(hourlyData.weather_code?[index]),
+                    precipitationProbabilityPercent: hourlyData.precipitation_probability?[index],
+                    precipitationMillimeters: hourlyData.precipitation?[index]
+                ))
+            }
+            hourly = built
+        } else {
+            hourly = []
+        }
+
+        let daily: [DailyWeather]
+        if let dailyData = response.daily {
+            let times = dailyData.time ?? []
+            var built: [DailyWeather] = []
+            built.reserveCapacity(times.count)
+            for index in times.indices {
+                guard let date = Self.openMeteoDateValue(times[index]) else { continue }
+                built.append(DailyWeather(
+                    date: date,
+                    tempMax: dailyData.temperature_2m_max?[index],
+                    tempMin: dailyData.temperature_2m_min?[index],
+                    condition: Self.wmoConditionText(dailyData.weather_code?[index]),
+                    icon: Self.weatherCodeIcon(dailyData.weather_code?[index]),
+                    precipitationProbabilityPercent: dailyData.precipitation_probability_max?[index],
+                    precipitationMillimeters: dailyData.precipitation_sum?[index]
+                ))
+            }
+            daily = built
+        } else {
+            daily = []
+        }
+
+        return (current, hourly, daily)
+    }
+
+    private func fetchOpenMeteoAirQuality(
+        longitude: Double,
+        latitude: Double
+    ) async throws -> AirQuality? {
+        let response = try await requestUnauthed(
+            OpenMeteoAirQualityResponse.self,
+            host: Self.openMeteoAirQualityHost,
+            path: "/v1/air-quality",
+            queryItems: [
+                URLQueryItem(name: "latitude", value: String(latitude)),
+                URLQueryItem(name: "longitude", value: String(longitude)),
+                URLQueryItem(name: "current", value: "us_aqi,pm2_5,pm10,ozone,nitrogen_dioxide"),
+                URLQueryItem(name: "timezone", value: "auto")
+            ]
+        )
+
+        guard let current = response.current else { return nil }
+        let aqi = current.us_aqi
+        return AirQuality(
+            aqi: aqi,
+            category: Self.usAqiCategory(aqi),
+            primaryPollutantName: Self.dominantOpenMeteoPollutant(current),
+            pm25: current.pm2_5,
+            pm10: current.pm10,
+            ozone: current.ozone,
+            nitrogenDioxide: current.nitrogen_dioxide
+        )
+    }
+
+    private func fetchDaily(apiHost: String, jwt: String, location: String) async throws -> (daily: [DailyWeather], attributionURL: String?) {
+        let response = try await request(
+            QWeatherDailyResponse.self,
+            apiHost: apiHost,
+            path: "/v7/weather/7d",
+            queryItems: [
+                URLQueryItem(name: "location", value: location),
+                URLQueryItem(name: "lang", value: "zh")
+            ],
+            jwt: jwt
+        )
+        try ensureSuccess(response.code, context: "daily")
+
+        let daily = (response.daily ?? []).compactMap { item -> DailyWeather? in
+            guard let date = Self.dateValue(item.fxDate) else { return nil }
+            return DailyWeather(
+                date: date,
+                tempMax: Self.doubleValue(item.tempMax),
+                tempMin: Self.doubleValue(item.tempMin),
+                condition: item.textDay ?? "N/A",
+                icon: item.iconDay,
+                precipitationProbabilityPercent: nil,
+                precipitationMillimeters: Self.doubleValue(item.precip)
+            )
+        }
+
+        return (daily, response.fxLink)
+    }
+
+    private func fetchAirQuality(
+        apiHost: String,
+        jwt: String,
+        longitude: Double,
+        latitude: Double
+    ) async throws -> AirQuality? {
+        let latText = String(format: "%.2f", latitude)
+        let lonText = String(format: "%.2f", longitude)
+        let path = "/airquality/v1/current/\(latText)/\(lonText)"
+
+        let response = try await requestPathParams(
+            QWeatherAirResponse.self,
+            apiHost: apiHost,
+            path: path,
+            queryItems: [URLQueryItem(name: "lang", value: "en")],
+            jwt: jwt
+        )
+
+        guard let index = response.indexes?.first(where: { $0.code == "us-epa" })
+            ?? response.indexes?.first else {
+            return nil
+        }
+
+        let primaryName = response.pollutants?.first(where: { $0.code == index.primaryPollutant?.code })?.name
+            ?? index.primaryPollutant?.name
+        let pollutants = Dictionary(
+            uniqueKeysWithValues: (response.pollutants ?? []).compactMap { pollutant -> (String, Double)? in
+                guard let value = pollutant.concentration?.value else { return nil }
+                return (pollutant.code, value)
+            }
+        )
+
+        return AirQuality(
+            aqi: index.aqi,
+            category: index.category ?? AirQuality.unknownCategory,
+            primaryPollutantName: primaryName,
+            pm25: pollutants["pm2p5"],
+            pm10: pollutants["pm10"],
+            ozone: pollutants["o3"],
+            nitrogenDioxide: pollutants["no2"]
         )
     }
 
@@ -338,6 +683,64 @@ final class WeatherService {
         return try JSONDecoder().decode(type, from: data)
     }
 
+    /// QWeather v1 air-quality API uses path params (lat/lon in path) and HTTP-status
+    /// error signalling (no top-level `code` field), unlike the v7 endpoints.
+    private func requestPathParams<T: Decodable>(
+        _ type: T.Type,
+        apiHost: String,
+        path: String,
+        queryItems: [URLQueryItem],
+        jwt: String
+    ) async throws -> T {
+        guard var components = URLComponents(string: normalizedAPIHost(apiHost)) else {
+            throw URLError(.badURL)
+        }
+
+        components.path = path
+        components.queryItems = queryItems.isEmpty ? nil : queryItems
+
+        guard let url = components.url else {
+            throw URLError(.badURL)
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue(Self.authorizationHeader(jwt: jwt), forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await client.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    /// Open-Meteo endpoints are unauthenticated (no JWT, no Authorization header).
+    private func requestUnauthed<T: Decodable>(
+        _ type: T.Type,
+        host: String,
+        path: String,
+        queryItems: [URLQueryItem]
+    ) async throws -> T {
+        guard var components = URLComponents(string: Self.normalizedHost(host)) else {
+            throw URLError(.badURL)
+        }
+
+        components.path = path
+        components.queryItems = queryItems
+
+        guard let url = components.url else {
+            throw URLError(.badURL)
+        }
+
+        let request = URLRequest(url: url)
+        let (data, response) = try await client.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+
+        return try JSONDecoder().decode(type, from: data)
+    }
+
     private func writeCache(_ snapshot: WeatherSnapshot) {
         do {
             let encoder = JSONEncoder()
@@ -388,6 +791,119 @@ final class WeatherService {
             return apiHost
         }
         return "https://\(apiHost)"
+    }
+
+    private static let openMeteoForecastHost = "api.open-meteo.com"
+    private static let openMeteoAirQualityHost = "air-quality-api.open-meteo.com"
+    private static let openMeteoGeocodingHost = "geocoding-api.open-meteo.com"
+    private static let openMeteoAttributionURL = "https://open-meteo.com/"
+
+    private static func normalizedHost(_ host: String) -> String {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+            return trimmed
+        }
+        return "https://\(trimmed)"
+    }
+
+    private static func openMeteoDateValue(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        return openMeteoDateTimeFormatter.date(from: value)
+            ?? openMeteoDateOnlyFormatter.date(from: value)
+            ?? ISO8601DateFormatter().date(from: value)
+    }
+
+    private static let openMeteoDateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        return formatter
+    }()
+
+    private static let openMeteoDateOnlyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    /// Stores the WMO weather code as the icon identifier so the UI mapper can
+    /// resolve it to an SF Symbol regardless of provider.
+    static func weatherCodeIcon(_ code: Double?) -> String? {
+        guard let code = code.map(Int.init) else { return nil }
+        return "wmo:\(code)"
+    }
+
+    /// Maps WMO weather interpretation codes (Open-Meteo) to short condition text.
+    /// Also serves as the canonical icon identifier for the Open-Meteo provider.
+    static func wmoConditionText(_ code: Double?) -> String {
+        guard let code = code.map(Int.init) else { return "N/A" }
+        switch code {
+        case 0: return "Clear sky"
+        case 1: return "Mainly clear"
+        case 2: return "Partly cloudy"
+        case 3: return "Overcast"
+        case 45: return "Fog"
+        case 48: return "Rime fog"
+        case 51: return "Light drizzle"
+        case 53: return "Moderate drizzle"
+        case 55: return "Dense drizzle"
+        case 56: return "Light freezing drizzle"
+        case 57: return "Dense freezing drizzle"
+        case 61: return "Slight rain"
+        case 63: return "Moderate rain"
+        case 65: return "Heavy rain"
+        case 66: return "Light freezing rain"
+        case 67: return "Heavy freezing rain"
+        case 71: return "Slight snow"
+        case 73: return "Moderate snow"
+        case 75: return "Heavy snow"
+        case 77: return "Snow grains"
+        case 80: return "Slight rain showers"
+        case 81: return "Moderate rain showers"
+        case 82: return "Violent rain showers"
+        case 85: return "Slight snow showers"
+        case 86: return "Heavy snow showers"
+        case 95: return "Thunderstorm"
+        case 96: return "Thunderstorm with hail"
+        case 99: return "Heavy thunderstorm with hail"
+        default: return "N/A"
+        }
+    }
+
+    static func usAqiCategory(_ aqi: Double?) -> String {
+        guard let aqi else { return AirQuality.unknownCategory }
+        switch aqi {
+        case ..<51: return "Good"
+        case ..<101: return "Moderate"
+        case ..<151: return "Unhealthy for Sensitive"
+        case ..<201: return "Unhealthy"
+        case ..<301: return "Very Unhealthy"
+        default: return "Hazardous"
+        }
+    }
+
+    private static func dominantOpenMeteoPollutant(_ current: OpenMeteoAirQualityCurrent) -> String? {
+        let candidates: [(value: Double?, name: String)] = [
+            (current.pm2_5, "PM2.5"),
+            (current.pm10, "PM10"),
+            (current.ozone, "Ozone"),
+            (current.nitrogen_dioxide, "NO₂")
+        ]
+        return candidates.compactMap { entry in
+            entry.value.map { (entry.name, $0) }
+        }.max(by: { $0.1 < $1.1 })?.0
+    }
+
+    private static func windDirectionText(_ degrees: Double?) -> String? {
+        guard let degrees = degrees?.truncatingRemainder(dividingBy: 360) else { return nil }
+        let sectors = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                       "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+        let index = Int((degrees / 22.5).rounded()) % 16
+        return sectors[index]
     }
 
     private static func effectiveJWT(config: AppConfig, cachedToken: inout CachedQWeatherToken?) throws -> String {
@@ -536,6 +1052,7 @@ final class WeatherService {
         guard let value else { return nil }
         return qweatherDateFormatter.date(from: value)
             ?? qweatherDateTimeFormatter.date(from: value)
+            ?? qweatherDateOnlyFormatter.date(from: value)
             ?? ISO8601DateFormatter().date(from: value)
     }
 
@@ -560,6 +1077,13 @@ final class WeatherService {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXXXX"
+        return formatter
+    }()
+
+    private static let qweatherDateOnlyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
 }
@@ -688,6 +1212,112 @@ private struct QWeatherMinutely: Decodable {
     let fxTime: String?
     let precip: String?
     let type: String?
+}
+
+private struct QWeatherDailyResponse: Decodable {
+    let code: String
+    let fxLink: String?
+    let daily: [QWeatherDaily]?
+}
+
+private struct QWeatherDaily: Decodable {
+    let fxDate: String?
+    let tempMax: String?
+    let tempMin: String?
+    let iconDay: String?
+    let textDay: String?
+    let precip: String?
+}
+
+private struct QWeatherAirResponse: Decodable {
+    let indexes: [QWeatherAirIndex]?
+    let pollutants: [QWeatherAirPollutant]?
+}
+
+private struct QWeatherAirIndex: Decodable {
+    let code: String?
+    let name: String?
+    let aqi: Double?
+    let aqiDisplay: String?
+    let category: String?
+    let primaryPollutant: QWeatherAirPrimaryPollutant?
+}
+
+private struct QWeatherAirPrimaryPollutant: Decodable {
+    let code: String?
+    let name: String?
+}
+
+private struct QWeatherAirPollutant: Decodable {
+    let code: String
+    let name: String?
+    let concentration: QWeatherAirConcentration?
+}
+
+private struct QWeatherAirConcentration: Decodable {
+    let value: Double?
+    let unit: String?
+}
+
+// MARK: - Open-Meteo DTOs
+
+private struct OpenMeteoGeoResponse: Decodable {
+    let results: [OpenMeteoGeoLocation]?
+}
+
+private struct OpenMeteoGeoLocation: Decodable {
+    let id: Int?
+    let name: String?
+    let latitude: Double
+    let longitude: Double
+    let country: String?
+    let admin1: String?
+}
+
+private struct OpenMeteoForecastResponse: Decodable {
+    let current: OpenMeteoForecastCurrent?
+    let hourly: OpenMeteoForecastHourly?
+    let daily: OpenMeteoForecastDaily?
+}
+
+private struct OpenMeteoForecastCurrent: Decodable {
+    let time: String?
+    let temperature_2m: Double?
+    let relative_humidity_2m: Double?
+    let apparent_temperature: Double?
+    let weather_code: Double?
+    let wind_speed_10m: Double?
+    let wind_direction_10m: Double?
+    let precipitation: Double?
+}
+
+private struct OpenMeteoForecastHourly: Decodable {
+    let time: [String]?
+    let temperature_2m: [Double]?
+    let weather_code: [Double]?
+    let precipitation_probability: [Double]?
+    let precipitation: [Double]?
+}
+
+private struct OpenMeteoForecastDaily: Decodable {
+    let time: [String]?
+    let weather_code: [Double]?
+    let temperature_2m_max: [Double]?
+    let temperature_2m_min: [Double]?
+    let precipitation_probability_max: [Double]?
+    let precipitation_sum: [Double]?
+}
+
+private struct OpenMeteoAirQualityResponse: Decodable {
+    let current: OpenMeteoAirQualityCurrent?
+}
+
+private struct OpenMeteoAirQualityCurrent: Decodable {
+    let us_aqi: Double?
+    let pm2_5: Double?
+    let pm10: Double?
+    let ozone: Double?
+    let nitrogen_dioxide: Double?
 }
 
 private extension Data {
