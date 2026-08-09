@@ -83,7 +83,7 @@ GlancePane runs locally and does not operate a telemetry service.
 - Codex prompts, responses, account email, and full project paths are not cached.
 - Codex project names are hidden unless explicitly enabled.
 - QWeather JWTs are generated locally from your private key and cached only in memory.
-- Open-Meteo requires no credentials; requests send only the configured coordinates.
+- Open-Meteo requires no credentials. Place names are sent to its geocoding API; resolved or configured coordinates are sent to its forecast and air-quality APIs.
 - Yahoo Finance and the active weather provider receive only the requests needed for their enabled pages.
 - The Weather page pauses network refreshes when hidden.
 

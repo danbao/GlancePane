@@ -1,13 +1,22 @@
 import CryptoKit
 import Foundation
+import OSLog
 
 final class WeatherService {
+    private static let logger = Logger(subsystem: "dev.danbao.glancepane", category: "weather")
+
     private let cacheURL: URL
     private let client: HTTPClient
+    private let now: () -> Date
     private var cachedToken: CachedQWeatherToken?
 
-    init(cacheURL: URL, client: HTTPClient? = nil) {
+    init(
+        cacheURL: URL,
+        client: HTTPClient? = nil,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.cacheURL = cacheURL
+        self.now = now
 
         if let client {
             self.client = client
@@ -69,6 +78,7 @@ final class WeatherService {
         ) else {
             return .failure(.setupRequired("Set a valid weather name or coordinates in GlancePane Settings"))
         }
+        let compatibleCache = compatibleCache(cached, provider: .qweather, location: location)
 
         do {
             let snapshot = try await fetchQWeatherSnapshot(
@@ -76,12 +86,12 @@ final class WeatherService {
                 apiHost: apiHost,
                 jwt: jwt,
                 location: location,
-                cached: cached
+                cached: compatibleCache
             )
             writeCache(snapshot)
             return .success(snapshot)
         } catch {
-            if var cached {
+            if var cached = compatibleCache {
                 cached.errorMessage = error.localizedDescription
                 cached.isCached = true
                 return .failure(.usingCache(cached, error.localizedDescription))
@@ -163,6 +173,7 @@ final class WeatherService {
             locationID: location.id,
             longitude: location.longitude,
             latitude: location.latitude,
+            timeZoneIdentifier: nil,
             current: current,
             hourly: hourly,
             daily: daily,
@@ -170,7 +181,7 @@ final class WeatherService {
             precipitationSummary: summary,
             airQuality: airQuality,
             attributionURL: attributionURL,
-            updatedAt: Date(),
+            updatedAt: now(),
             isCached: false,
             errorMessage: errors.first?.localizedDescription
         )
@@ -181,17 +192,17 @@ final class WeatherService {
         guard let location = await resolveOpenMeteoLocation(config: config, cached: cached) else {
             return .failure(.setupRequired("Set a valid weather name or coordinates in GlancePane Settings"))
         }
+        let compatibleCache = compatibleCache(cached, provider: .openMeteo, location: location)
 
         do {
             let snapshot = try await fetchOpenMeteoSnapshot(
-                config: config,
                 location: location,
-                cached: cached
+                cached: compatibleCache
             )
             writeCache(snapshot)
             return .success(snapshot)
         } catch {
-            if var cached {
+            if var cached = compatibleCache {
                 cached.errorMessage = error.localizedDescription
                 cached.isCached = true
                 return .failure(.usingCache(cached, error.localizedDescription))
@@ -201,7 +212,6 @@ final class WeatherService {
     }
 
     private func fetchOpenMeteoSnapshot(
-        config: AppConfig,
         location: ResolvedWeatherLocation,
         cached: WeatherSnapshot?
     ) async throws -> WeatherSnapshot {
@@ -209,6 +219,7 @@ final class WeatherService {
         var hourly = cached?.hourly ?? []
         var daily = cached?.daily ?? []
         var airQuality = cached?.airQuality
+        var timeZoneIdentifier = cached?.timeZoneIdentifier
         var errors: [Error] = []
         let attributionURL = cached?.attributionURL ?? Self.openMeteoAttributionURL
 
@@ -217,6 +228,7 @@ final class WeatherService {
             current = result.current
             hourly = result.hourly
             daily = result.daily
+            timeZoneIdentifier = result.timeZoneIdentifier
         } catch {
             errors.append(error)
         }
@@ -237,6 +249,7 @@ final class WeatherService {
             locationID: location.id,
             longitude: location.longitude,
             latitude: location.latitude,
+            timeZoneIdentifier: timeZoneIdentifier,
             current: current,
             hourly: hourly,
             daily: daily,
@@ -244,7 +257,7 @@ final class WeatherService {
             precipitationSummary: "No minute rain data",
             airQuality: airQuality,
             attributionURL: attributionURL,
-            updatedAt: Date(),
+            updatedAt: now(),
             isCached: false,
             errorMessage: errors.first?.localizedDescription
         )
@@ -256,8 +269,8 @@ final class WeatherService {
     ) async -> ResolvedWeatherLocation? {
         let configuredName = config.weather.location.name
         if let cached,
-           (!configuredName.isEmpty && cached.locationName == configuredName)
-            || coordinatesMatch(cached: cached, config: config.weather.location),
+           cached.provider == .openMeteo,
+           cachedLocationMatchesConfig(cached, config: config.weather.location),
            cached.longitude.isFinite,
            cached.latitude.isFinite {
             return ResolvedWeatherLocation(
@@ -286,14 +299,16 @@ final class WeatherService {
                    item.latitude.isFinite,
                    item.longitude.isFinite {
                     return ResolvedWeatherLocation(
-                        name: item.name ?? configuredName,
+                        name: configuredName,
                         id: item.id.map(String.init),
                         longitude: item.longitude,
                         latitude: item.latitude
                     )
                 }
             } catch {
-                NSLog("GlancePane Open-Meteo location lookup fallback: \(error)")
+                Self.logger.notice(
+                    "Open-Meteo location lookup fallback: \(error.localizedDescription, privacy: .private)"
+                )
             }
         }
 
@@ -312,7 +327,12 @@ final class WeatherService {
     private func fetchOpenMeteoForecast(
         longitude: Double,
         latitude: Double
-    ) async throws -> (current: CurrentWeather?, hourly: [HourlyWeather], daily: [DailyWeather]) {
+    ) async throws -> (
+        current: CurrentWeather?,
+        hourly: [HourlyWeather],
+        daily: [DailyWeather],
+        timeZoneIdentifier: String?
+    ) {
         let response = try await requestUnauthed(
             OpenMeteoForecastResponse.self,
             host: Self.openMeteoForecastHost,
@@ -327,11 +347,15 @@ final class WeatherService {
                 URLQueryItem(name: "timezone", value: "auto")
             ]
         )
+        let timeZone = Self.openMeteoTimeZone(
+            identifier: response.timezone,
+            utcOffsetSeconds: response.utc_offset_seconds
+        )
 
         let current: CurrentWeather?
         if let currentData = response.current {
             current = CurrentWeather(
-                observedAt: Self.openMeteoDateValue(currentData.time),
+                observedAt: Self.openMeteoDateValue(currentData.time, timeZone: timeZone),
                 temperatureCelsius: currentData.temperature_2m,
                 feelsLikeCelsius: currentData.apparent_temperature,
                 condition: Self.wmoConditionText(currentData.weather_code),
@@ -351,17 +375,20 @@ final class WeatherService {
             var built: [HourlyWeather] = []
             built.reserveCapacity(times.count)
             for index in times.indices {
-                guard let forecastAt = Self.openMeteoDateValue(times[index]) else { continue }
+                guard let forecastAt = Self.openMeteoDateValue(times[index], timeZone: timeZone) else { continue }
                 built.append(HourlyWeather(
                     forecastAt: forecastAt,
-                    temperatureCelsius: hourlyData.temperature_2m?[index],
-                    condition: Self.wmoConditionText(hourlyData.weather_code?[index]),
-                    icon: Self.weatherCodeIcon(hourlyData.weather_code?[index]),
-                    precipitationProbabilityPercent: hourlyData.precipitation_probability?[index],
-                    precipitationMillimeters: hourlyData.precipitation?[index]
+                    temperatureCelsius: Self.openMeteoValue(hourlyData.temperature_2m, at: index),
+                    condition: Self.wmoConditionText(Self.openMeteoValue(hourlyData.weather_code, at: index)),
+                    icon: Self.weatherCodeIcon(Self.openMeteoValue(hourlyData.weather_code, at: index)),
+                    precipitationProbabilityPercent: Self.openMeteoValue(hourlyData.precipitation_probability, at: index),
+                    precipitationMillimeters: Self.openMeteoValue(hourlyData.precipitation, at: index)
                 ))
             }
-            hourly = built
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = timeZone
+            let currentHour = calendar.dateInterval(of: .hour, for: now())?.start ?? now()
+            hourly = built.filter { $0.forecastAt >= currentHour }
         } else {
             hourly = []
         }
@@ -372,15 +399,15 @@ final class WeatherService {
             var built: [DailyWeather] = []
             built.reserveCapacity(times.count)
             for index in times.indices {
-                guard let date = Self.openMeteoDateValue(times[index]) else { continue }
+                guard let date = Self.openMeteoDateValue(times[index], timeZone: timeZone) else { continue }
                 built.append(DailyWeather(
                     date: date,
-                    tempMax: dailyData.temperature_2m_max?[index],
-                    tempMin: dailyData.temperature_2m_min?[index],
-                    condition: Self.wmoConditionText(dailyData.weather_code?[index]),
-                    icon: Self.weatherCodeIcon(dailyData.weather_code?[index]),
-                    precipitationProbabilityPercent: dailyData.precipitation_probability_max?[index],
-                    precipitationMillimeters: dailyData.precipitation_sum?[index]
+                    tempMax: Self.openMeteoValue(dailyData.temperature_2m_max, at: index),
+                    tempMin: Self.openMeteoValue(dailyData.temperature_2m_min, at: index),
+                    condition: Self.wmoConditionText(Self.openMeteoValue(dailyData.weather_code, at: index)),
+                    icon: Self.weatherCodeIcon(Self.openMeteoValue(dailyData.weather_code, at: index)),
+                    precipitationProbabilityPercent: Self.openMeteoValue(dailyData.precipitation_probability_max, at: index),
+                    precipitationMillimeters: Self.openMeteoValue(dailyData.precipitation_sum, at: index)
                 ))
             }
             daily = built
@@ -388,7 +415,7 @@ final class WeatherService {
             daily = []
         }
 
-        return (current, hourly, daily)
+        return (current, hourly, daily, timeZone.identifier)
     }
 
     private func fetchOpenMeteoAirQuality(
@@ -500,8 +527,8 @@ final class WeatherService {
     ) async -> ResolvedWeatherLocation? {
         let configuredName = config.weather.location.name
         if let cached,
-           (!configuredName.isEmpty && cached.locationName == configuredName)
-            || coordinatesMatch(cached: cached, config: config.weather.location),
+           cached.provider == .qweather,
+           cachedLocationMatchesConfig(cached, config: config.weather.location),
            cached.longitude.isFinite,
            cached.latitude.isFinite {
             return ResolvedWeatherLocation(
@@ -538,7 +565,9 @@ final class WeatherService {
                     )
                 }
             } catch {
-                NSLog("GlancePane weather location lookup fallback: \(error)")
+                Self.logger.notice(
+                    "QWeather location lookup fallback: \(error.localizedDescription, privacy: .private)"
+                )
             }
         }
 
@@ -563,6 +592,30 @@ final class WeatherService {
         }
         return abs(cached.longitude - longitude) < 0.0001
             && abs(cached.latitude - latitude) < 0.0001
+    }
+
+    private func cachedLocationMatchesConfig(
+        _ cached: WeatherSnapshot,
+        config: WeatherLocationConfig
+    ) -> Bool {
+        if !config.name.isEmpty {
+            return cached.locationName == config.name
+        }
+        return coordinatesMatch(cached: cached, config: config)
+    }
+
+    private func compatibleCache(
+        _ cached: WeatherSnapshot?,
+        provider: WeatherProvider,
+        location: ResolvedWeatherLocation
+    ) -> WeatherSnapshot? {
+        guard let cached,
+              cached.provider == provider,
+              abs(cached.longitude - location.longitude) < 0.0001,
+              abs(cached.latitude - location.latitude) < 0.0001 else {
+            return nil
+        }
+        return cached
     }
 
     private func fetchNow(apiHost: String, jwt: String, location: String) async throws -> (current: CurrentWeather, attributionURL: String?) {
@@ -747,7 +800,9 @@ final class WeatherService {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try SecureFileStore.write(encoder.encode(snapshot), to: cacheURL)
         } catch {
-            NSLog("GlancePane failed to write weather cache: \(error)")
+            Self.logger.error(
+                "Failed to write weather cache: \(error.localizedDescription, privacy: .private)"
+            )
         }
     }
 
@@ -807,28 +862,38 @@ final class WeatherService {
         return "https://\(trimmed)"
     }
 
-    private static func openMeteoDateValue(_ value: String?) -> Date? {
+    private static func openMeteoTimeZone(
+        identifier: String?,
+        utcOffsetSeconds: Int?
+    ) -> TimeZone {
+        if let identifier, let timeZone = TimeZone(identifier: identifier) {
+            return timeZone
+        }
+        if let utcOffsetSeconds, let timeZone = TimeZone(secondsFromGMT: utcOffsetSeconds) {
+            return timeZone
+        }
+        return TimeZone(secondsFromGMT: 0)!
+    }
+
+    private static func openMeteoDateValue(_ value: String?, timeZone: TimeZone) -> Date? {
         guard let value else { return nil }
-        return openMeteoDateTimeFormatter.date(from: value)
-            ?? openMeteoDateOnlyFormatter.date(from: value)
+        return openMeteoDateFormatter(format: "yyyy-MM-dd'T'HH:mm", timeZone: timeZone).date(from: value)
+            ?? openMeteoDateFormatter(format: "yyyy-MM-dd", timeZone: timeZone).date(from: value)
             ?? ISO8601DateFormatter().date(from: value)
     }
 
-    private static let openMeteoDateTimeFormatter: DateFormatter = {
+    private static func openMeteoDateFormatter(format: String, timeZone: TimeZone) -> DateFormatter {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        formatter.timeZone = timeZone
+        formatter.dateFormat = format
         return formatter
-    }()
+    }
 
-    private static let openMeteoDateOnlyFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
+    private static func openMeteoValue(_ values: [Double?]?, at index: Int) -> Double? {
+        guard let values, values.indices.contains(index) else { return nil }
+        return values[index]
+    }
 
     /// Stores the WMO weather code as the icon identifier so the UI mapper can
     /// resolve it to an SF Symbol regardless of provider.
@@ -944,7 +1009,7 @@ final class WeatherService {
             now: now
         )
         cachedToken = token
-        NSLog("GlancePane generated QWeather JWT expiring at \(token.expiresAt)")
+        Self.logger.notice("Generated QWeather JWT expiring at \(token.expiresAt, privacy: .public)")
         return token.token
     }
 
@@ -1275,6 +1340,8 @@ private struct OpenMeteoGeoLocation: Decodable {
 }
 
 private struct OpenMeteoForecastResponse: Decodable {
+    let utc_offset_seconds: Int?
+    let timezone: String?
     let current: OpenMeteoForecastCurrent?
     let hourly: OpenMeteoForecastHourly?
     let daily: OpenMeteoForecastDaily?
@@ -1293,19 +1360,19 @@ private struct OpenMeteoForecastCurrent: Decodable {
 
 private struct OpenMeteoForecastHourly: Decodable {
     let time: [String]?
-    let temperature_2m: [Double]?
-    let weather_code: [Double]?
-    let precipitation_probability: [Double]?
-    let precipitation: [Double]?
+    let temperature_2m: [Double?]?
+    let weather_code: [Double?]?
+    let precipitation_probability: [Double?]?
+    let precipitation: [Double?]?
 }
 
 private struct OpenMeteoForecastDaily: Decodable {
     let time: [String]?
-    let weather_code: [Double]?
-    let temperature_2m_max: [Double]?
-    let temperature_2m_min: [Double]?
-    let precipitation_probability_max: [Double]?
-    let precipitation_sum: [Double]?
+    let weather_code: [Double?]?
+    let temperature_2m_max: [Double?]?
+    let temperature_2m_min: [Double?]?
+    let precipitation_probability_max: [Double?]?
+    let precipitation_sum: [Double?]?
 }
 
 private struct OpenMeteoAirQualityResponse: Decodable {

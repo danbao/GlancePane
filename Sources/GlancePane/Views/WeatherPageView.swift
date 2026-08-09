@@ -28,10 +28,22 @@ struct WeatherPageView: View {
                     }
                     .frame(height: topHeight)
 
-                    WeatherDailyStrip(daily: snapshot.daily, unit: config.appearance.units.temperature, theme: theme, scale: scale)
+                    WeatherDailyStrip(
+                        daily: snapshot.daily,
+                        timeZoneIdentifier: snapshot.timeZoneIdentifier,
+                        unit: config.appearance.units.temperature,
+                        theme: theme,
+                        scale: scale
+                    )
                         .frame(height: midHeight)
 
-                    WeatherHourlyStrip(hourly: snapshot.hourly, unit: config.appearance.units.temperature, theme: theme, scale: scale)
+                    WeatherHourlyStrip(
+                        hourly: snapshot.hourly,
+                        timeZoneIdentifier: snapshot.timeZoneIdentifier,
+                        unit: config.appearance.units.temperature,
+                        theme: theme,
+                        scale: scale
+                    )
                         .frame(height: bottomHeight)
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height)
@@ -128,9 +140,15 @@ private struct WeatherHeroPanel: View {
 
     private var observedText: String {
         guard let observedAt = current?.observedAt else {
-            return DateFormatter.cached(format: "HH:mm:ss").string(from: snapshot.updatedAt)
+            return DateFormatter.cached(
+                format: "HH:mm:ss",
+                timeZoneIdentifier: snapshot.timeZoneIdentifier
+            ).string(from: snapshot.updatedAt)
         }
-        return DateFormatter.cached(format: "HH:mm").string(from: observedAt)
+        return DateFormatter.cached(
+            format: "HH:mm",
+            timeZoneIdentifier: snapshot.timeZoneIdentifier
+        ).string(from: observedAt)
     }
 
     private func formattedTemperature(_ value: Double?) -> String {
@@ -224,7 +242,12 @@ private struct WeatherNowcastPanel: View {
                 if !minutely.isEmpty {
                     WeatherMinutelyRainChart(points: minutely, theme: theme, scale: scale)
                 } else if !snapshot.hourly.isEmpty {
-                    WeatherHourlyRainChart(hourly: Array(snapshot.hourly.prefix(12)), theme: theme, scale: scale)
+                    WeatherHourlyRainChart(
+                        hourly: Array(snapshot.hourly.prefix(12)),
+                        timeZoneIdentifier: snapshot.timeZoneIdentifier,
+                        theme: theme,
+                        scale: scale
+                    )
                 } else {
                     Text("NO RAIN DATA")
                         .font(.system(size: 36 * scale, weight: .black, design: .rounded))
@@ -325,6 +348,7 @@ private struct WeatherMinutelyRainChart: View {
 
 private struct WeatherHourlyRainChart: View {
     let hourly: [HourlyWeather]
+    let timeZoneIdentifier: String?
     let theme: ScreenTheme
     let scale: CGFloat
 
@@ -339,7 +363,12 @@ private struct WeatherHourlyRainChart: View {
                         RoundedRectangle(cornerRadius: 3 * scale)
                             .fill(precipitation > 0 ? theme.blue : theme.secondaryText.opacity(0.22))
                             .frame(height: max(5 * scale, proxy.size.height * 0.72 * CGFloat(precipitation / maxRain)))
-                        Text(DateFormatter.cached(format: "HH").string(from: item.forecastAt))
+                        Text(
+                            DateFormatter.cached(
+                                format: "HH",
+                                timeZoneIdentifier: timeZoneIdentifier
+                            ).string(from: item.forecastAt)
+                        )
                             .font(.system(size: DashboardTypography.chartTick * scale, weight: .black, design: .monospaced))
                             .foregroundStyle(theme.secondaryText)
                     }
@@ -354,6 +383,7 @@ private struct WeatherHourlyRainChart: View {
 
 private struct WeatherDailyStrip: View {
     let daily: [DailyWeather]
+    let timeZoneIdentifier: String?
     let unit: TemperatureUnit
     let theme: ScreenTheme
     let scale: CGFloat
@@ -368,7 +398,13 @@ private struct WeatherDailyStrip: View {
             } else {
                 HStack(spacing: 8 * scale) {
                     ForEach(Array(daily.prefix(7))) { item in
-                        WeatherDailyForecastTile(item: item, unit: unit, theme: theme, scale: scale)
+                        WeatherDailyForecastTile(
+                            item: item,
+                            timeZoneIdentifier: timeZoneIdentifier,
+                            unit: unit,
+                            theme: theme,
+                            scale: scale
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -379,13 +415,19 @@ private struct WeatherDailyStrip: View {
 
 private struct WeatherDailyForecastTile: View {
     let item: DailyWeather
+    let timeZoneIdentifier: String?
     let unit: TemperatureUnit
     let theme: ScreenTheme
     let scale: CGFloat
 
     var body: some View {
         VStack(spacing: 4 * scale) {
-            Text(DateFormatter.cached(format: "EEE").string(from: item.date))
+            Text(
+                DateFormatter.cached(
+                    format: "EEE",
+                    timeZoneIdentifier: timeZoneIdentifier
+                ).string(from: item.date)
+            )
                 .font(.system(size: 20 * scale, weight: .black, design: .monospaced))
                 .foregroundStyle(theme.secondaryText)
 
@@ -419,6 +461,7 @@ private struct WeatherDailyForecastTile: View {
 
 private struct WeatherHourlyStrip: View {
     let hourly: [HourlyWeather]
+    let timeZoneIdentifier: String?
     let unit: TemperatureUnit
     let theme: ScreenTheme
     let scale: CGFloat
@@ -433,7 +476,13 @@ private struct WeatherHourlyStrip: View {
             } else {
                 HStack(spacing: 8 * scale) {
                     ForEach(Array(hourly.prefix(8))) { item in
-                        WeatherHourlyForecastTile(item: item, unit: unit, theme: theme, scale: scale)
+                        WeatherHourlyForecastTile(
+                            item: item,
+                            timeZoneIdentifier: timeZoneIdentifier,
+                            unit: unit,
+                            theme: theme,
+                            scale: scale
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -444,13 +493,19 @@ private struct WeatherHourlyStrip: View {
 
 private struct WeatherHourlyForecastTile: View {
     let item: HourlyWeather
+    let timeZoneIdentifier: String?
     let unit: TemperatureUnit
     let theme: ScreenTheme
     let scale: CGFloat
 
     var body: some View {
         VStack(spacing: 4 * scale) {
-            Text(DateFormatter.cached(format: "HH:mm").string(from: item.forecastAt))
+            Text(
+                DateFormatter.cached(
+                    format: "HH:mm",
+                    timeZoneIdentifier: timeZoneIdentifier
+                ).string(from: item.forecastAt)
+            )
                 .font(.system(size: 20 * scale, weight: .black, design: .monospaced))
                 .foregroundStyle(theme.secondaryText)
 

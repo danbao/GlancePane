@@ -106,6 +106,9 @@ struct GlancePaneTestRunner {
             TestCase("weather cache reads cached snapshot") {
                 try testWeatherCacheReadsCachedSnapshot()
             },
+            TestCase("legacy weather cache remains readable") {
+                try testLegacyWeatherCacheRemainsReadable()
+            },
             TestCase("weather fetch reports missing setup") {
                 try await testWeatherFetchReportsMissingSetup()
             },
@@ -121,17 +124,35 @@ struct GlancePaneTestRunner {
             TestCase("open-meteo forecast maps to snapshot") {
                 try await testOpenMeteoForecastMapsToSnapshot()
             },
+            TestCase("open-meteo handles sparse arrays and local time") {
+                try await testOpenMeteoHandlesSparseArraysAndLocalTime()
+            },
             TestCase("open-meteo needs only location") {
                 try await testOpenMeteoNeedsOnlyLocation()
             },
             TestCase("open-meteo partial keeps cached air quality") {
                 try await testOpenMeteoPartialKeepsCachedAirQuality()
             },
+            TestCase("open-meteo rejects incompatible cached air quality") {
+                try await testOpenMeteoRejectsIncompatibleCachedAirQuality()
+            },
+            TestCase("open-meteo rejects cached air quality from another location") {
+                try await testOpenMeteoRejectsCachedAirQualityFromAnotherLocation()
+            },
+            TestCase("open-meteo changed name invalidates cached coordinates") {
+                try await testOpenMeteoChangedNameInvalidatesCachedCoordinates()
+            },
+            TestCase("open-meteo geocoding separates names and coordinates") {
+                try await testOpenMeteoGeocodingSeparatesNamesAndCoordinates()
+            },
             TestCase("qweather daily and air quality fetch") {
                 try await testQWeatherDailyAndAirQualityFetch()
             },
             TestCase("qweather air quality uses path params") {
                 try await testQWeatherAirQualityUsesPathParams()
+            },
+            TestCase("qweather rejects open-meteo cache") {
+                try await testQWeatherRejectsOpenMeteoCache()
             },
             TestCase("config defaults to open-meteo provider") {
                 try testConfigDefaultsToOpenMeteoProvider()
@@ -846,6 +867,28 @@ private func testWeatherCacheReadsCachedSnapshot() throws {
     try expectEqual(cached?.current?.condition, "多云")
 }
 
+private func testLegacyWeatherCacheRemainsReadable() throws {
+    let directory = try makeTestDirectory("legacy-weather-cache")
+    let store = ConfigStore(configDirectoryURL: directory)
+    let encoded = try JSONEncoder().encode(makeWeatherSnapshot())
+    guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+        throw TestFailure(message: "expected encoded weather object", file: #fileID, line: #line)
+    }
+    object.removeValue(forKey: "daily")
+    object.removeValue(forKey: "airQuality")
+    object.removeValue(forKey: "timeZoneIdentifier")
+    let legacyData = try JSONSerialization.data(withJSONObject: object)
+    try legacyData.write(to: store.weatherCacheURL, options: [.atomic])
+
+    let cached = WeatherService(cacheURL: store.weatherCacheURL).loadCached()
+
+    try expectEqual(cached?.isCached, true)
+    try expectEqual(cached?.daily, [])
+    try expectEqual(cached?.airQuality, nil)
+    try expectEqual(cached?.timeZoneIdentifier, nil)
+    try expectEqual(cached?.current?.condition, "多云")
+}
+
 private func testWeatherFetchReportsMissingSetup() async throws {
     let directory = try makeTestDirectory("weather-setup")
     let store = ConfigStore(configDirectoryURL: directory)
@@ -1071,14 +1114,20 @@ private func testOpenMeteoForecastMapsToSnapshot() async throws {
     let store = ConfigStore(configDirectoryURL: directory)
     var config = AppConfig.default
     config.weather.location = WeatherLocationConfig(name: "", longitude: 13.41, latitude: 52.52)
+    var geocodingRequests = 0
 
     let client = MockHTTPClient { request in
         switch request.url?.host {
+        case "geocoding-api.open-meteo.com":
+            geocodingRequests += 1
+            throw URLError(.badURL)
         case "api.open-meteo.com":
             return try httpResponse(
                 for: request,
                 json: """
                 {
+                  "utc_offset_seconds": 7200,
+                  "timezone": "Europe/Berlin",
                   "current": {
                     "time": "2026-07-25T10:00",
                     "temperature_2m": 18.5,
@@ -1127,12 +1176,18 @@ private func testOpenMeteoForecastMapsToSnapshot() async throws {
         }
     }
 
-    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+    let service = WeatherService(
+        cacheURL: store.weatherCacheURL,
+        client: client,
+        now: { Date(timeIntervalSince1970: 1_784_968_200) }
+    )
     let result = await service.fetch(config: config)
 
     switch result {
     case .success(let snapshot):
         try expectEqual(snapshot.provider, .openMeteo)
+        try expectEqual(snapshot.timeZoneIdentifier, "Europe/Berlin")
+        try expectEqual(snapshot.current?.observedAt, Date(timeIntervalSince1970: 1_784_966_400))
         try expectEqual(snapshot.current?.temperatureCelsius, 18.5)
         try expectEqual(snapshot.current?.condition, "Clear sky")
         try expectEqual(snapshot.current?.icon, "wmo:0")
@@ -1146,8 +1201,80 @@ private func testOpenMeteoForecastMapsToSnapshot() async throws {
         try expectEqual(snapshot.airQuality?.aqi, 46)
         try expectEqual(snapshot.airQuality?.category, "Good")
         try expectEqual(snapshot.airQuality?.pm25, 5.4)
+        try expectEqual(geocodingRequests, 0)
     case .failure(let error):
         throw TestFailure(message: "Open-Meteo forecast should succeed, got \(error)", file: #fileID, line: #line)
+    }
+}
+
+private func testOpenMeteoHandlesSparseArraysAndLocalTime() async throws {
+    let directory = try makeTestDirectory("openmeteo-sparse-timezone")
+    let store = ConfigStore(configDirectoryURL: directory)
+    var config = AppConfig.default
+    config.weather.location = WeatherLocationConfig(name: "", longitude: -118.24, latitude: 34.05)
+
+    let client = MockHTTPClient { request in
+        switch request.url?.host {
+        case "api.open-meteo.com":
+            return try httpResponse(
+                for: request,
+                json: """
+                {
+                  "utc_offset_seconds": -25200,
+                  "timezone": "America/Los_Angeles",
+                  "current": {
+                    "time": "2026-07-25T10:30",
+                    "temperature_2m": 24.0,
+                    "weather_code": 0
+                  },
+                  "hourly": {
+                    "time": ["2026-07-25T00:00", "2026-07-25T10:00", "2026-07-25T11:00"],
+                    "temperature_2m": [18.0, null],
+                    "weather_code": [0],
+                    "precipitation_probability": [5, null, 20],
+                    "precipitation": []
+                  },
+                  "daily": {
+                    "time": ["2026-07-25"],
+                    "weather_code": [],
+                    "temperature_2m_max": [30.0],
+                    "temperature_2m_min": [17.0]
+                  }
+                }
+                """
+            )
+        case "air-quality-api.open-meteo.com":
+            return try httpResponse(for: request, json: "{\"current\":{\"us_aqi\":42}}")
+        default:
+            throw URLError(.badURL)
+        }
+    }
+    let service = WeatherService(
+        cacheURL: store.weatherCacheURL,
+        client: client,
+        now: { Date(timeIntervalSince1970: 1_785_000_600) }
+    )
+
+    let result = await service.fetch(config: config)
+
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(snapshot.timeZoneIdentifier, "America/Los_Angeles")
+        try expectEqual(snapshot.hourly.count, 2)
+        try expectEqual(snapshot.hourly.first?.forecastAt, Date(timeIntervalSince1970: 1_784_998_800))
+        try expectEqual(snapshot.hourly.first?.temperatureCelsius, nil)
+        try expectEqual(snapshot.hourly.last?.precipitationProbabilityPercent, 20)
+        try expectEqual(snapshot.hourly.last?.precipitationMillimeters, nil)
+        try expectEqual(snapshot.daily.first?.date, Date(timeIntervalSince1970: 1_784_962_800))
+        try expectEqual(
+            DateFormatter.cached(
+                format: "EEE",
+                timeZoneIdentifier: snapshot.timeZoneIdentifier
+            ).string(from: snapshot.daily[0].date),
+            "Sat"
+        )
+    case .failure(let error):
+        throw TestFailure(message: "sparse Open-Meteo response should succeed, got \(error)", file: #fileID, line: #line)
     }
 }
 
@@ -1163,6 +1290,7 @@ private func testOpenMeteoPartialKeepsCachedAirQuality() async throws {
         locationID: cached.locationID,
         longitude: 13.41,
         latitude: 52.52,
+        timeZoneIdentifier: "Europe/Berlin",
         current: cached.current,
         hourly: cached.hourly,
         daily: cached.daily,
@@ -1219,6 +1347,249 @@ private func testOpenMeteoPartialKeepsCachedAirQuality() async throws {
     case .failure(let error):
         throw TestFailure(message: "Open-Meteo partial should succeed with cached AQI, got \(error)", file: #fileID, line: #line)
     }
+}
+
+private func testOpenMeteoRejectsIncompatibleCachedAirQuality() async throws {
+    let directory = try makeTestDirectory("openmeteo-incompatible-cache")
+    let store = ConfigStore(configDirectoryURL: directory)
+    try writeJSON(makeWeatherSnapshot(), to: store.weatherCacheURL)
+
+    var config = AppConfig.default
+    config.weather.location = WeatherLocationConfig(name: "", longitude: 120, latitude: 30)
+    let client = MockHTTPClient { request in
+        switch request.url?.host {
+        case "api.open-meteo.com":
+            return try httpResponse(
+                for: request,
+                json: """
+                {
+                  "timezone": "Asia/Shanghai",
+                  "utc_offset_seconds": 28800,
+                  "current": {
+                    "time": "2026-07-25T10:00",
+                    "temperature_2m": 27.0,
+                    "weather_code": 1
+                  }
+                }
+                """
+            )
+        case "air-quality-api.open-meteo.com":
+            throw URLError(.timedOut)
+        default:
+            throw URLError(.badURL)
+        }
+    }
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+
+    let result = await service.fetch(config: config)
+
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(snapshot.provider, .openMeteo)
+        try expectEqual(snapshot.current?.temperatureCelsius, 27)
+        try expectEqual(snapshot.airQuality, nil)
+        try expect(snapshot.errorMessage != nil, "failed AQI request should remain visible")
+    case .failure(let error):
+        throw TestFailure(message: "forecast should succeed without incompatible cache, got \(error)", file: #fileID, line: #line)
+    }
+}
+
+private func testOpenMeteoRejectsCachedAirQualityFromAnotherLocation() async throws {
+    let directory = try makeTestDirectory("openmeteo-other-location-cache")
+    let store = ConfigStore(configDirectoryURL: directory)
+    let base = makeWeatherSnapshot()
+    let oldLocation = WeatherSnapshot(
+        provider: .openMeteo,
+        locationName: "Berlin",
+        locationID: "2950159",
+        longitude: 13.41,
+        latitude: 52.52,
+        timeZoneIdentifier: "Europe/Berlin",
+        current: base.current,
+        hourly: base.hourly,
+        daily: base.daily,
+        minutely: [],
+        precipitationSummary: "No minute rain data",
+        airQuality: base.airQuality,
+        attributionURL: "https://open-meteo.com/",
+        updatedAt: base.updatedAt,
+        isCached: false,
+        errorMessage: nil
+    )
+    try writeJSON(oldLocation, to: store.weatherCacheURL)
+
+    var config = AppConfig.default
+    config.weather.location = WeatherLocationConfig(name: "", longitude: 120, latitude: 30)
+    let client = MockHTTPClient { request in
+        switch request.url?.host {
+        case "api.open-meteo.com":
+            return try httpResponse(
+                for: request,
+                json: """
+                {
+                  "timezone": "Asia/Shanghai",
+                  "utc_offset_seconds": 28800,
+                  "current": {
+                    "time": "2026-07-25T10:00",
+                    "temperature_2m": 27.0,
+                    "weather_code": 1
+                  }
+                }
+                """
+            )
+        case "air-quality-api.open-meteo.com":
+            throw URLError(.timedOut)
+        default:
+            throw URLError(.badURL)
+        }
+    }
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+
+    let result = await service.fetch(config: config)
+
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(snapshot.timeZoneIdentifier, "Asia/Shanghai")
+        try expectEqual(snapshot.current?.observedAt, Date(timeIntervalSince1970: 1_784_944_800))
+        guard let observedAt = snapshot.current?.observedAt else {
+            throw TestFailure(message: "Shanghai current time should parse", file: #fileID, line: #line)
+        }
+        try expectEqual(
+            DateFormatter.cached(
+                format: "HH EEE",
+                timeZoneIdentifier: snapshot.timeZoneIdentifier
+            ).string(from: observedAt),
+            "10 Sat"
+        )
+        try expectEqual(snapshot.airQuality, nil)
+    case .failure(let error):
+        throw TestFailure(message: "new location forecast should not use old cache, got \(error)", file: #fileID, line: #line)
+    }
+}
+
+private func testOpenMeteoChangedNameInvalidatesCachedCoordinates() async throws {
+    let directory = try makeTestDirectory("openmeteo-changed-name")
+    let store = ConfigStore(configDirectoryURL: directory)
+    let base = makeWeatherSnapshot()
+    let oldLocation = WeatherSnapshot(
+        provider: .openMeteo,
+        locationName: "Berlin",
+        locationID: "2950159",
+        longitude: 13.41,
+        latitude: 52.52,
+        timeZoneIdentifier: "Europe/Berlin",
+        current: base.current,
+        hourly: base.hourly,
+        daily: base.daily,
+        minutely: [],
+        precipitationSummary: "No minute rain data",
+        airQuality: base.airQuality,
+        attributionURL: "https://open-meteo.com/",
+        updatedAt: base.updatedAt,
+        isCached: false,
+        errorMessage: nil
+    )
+    try writeJSON(oldLocation, to: store.weatherCacheURL)
+
+    var config = AppConfig.default
+    config.weather.location = WeatherLocationConfig(name: "Potsdam", longitude: 13.41, latitude: 52.52)
+    var geocodingRequests = 0
+    let client = MockHTTPClient { request in
+        switch request.url?.host {
+        case "geocoding-api.open-meteo.com":
+            geocodingRequests += 1
+            if geocodingRequests > 1 {
+                throw URLError(.timedOut)
+            }
+            return try httpResponse(
+                for: request,
+                json: "{\"results\":[{\"id\":2852458,\"name\":\"Potsdam\",\"latitude\":52.40,\"longitude\":13.06}]}"
+            )
+        case "api.open-meteo.com":
+            return try httpResponse(
+                for: request,
+                json: "{\"timezone\":\"Europe/Berlin\",\"current\":{\"time\":\"2026-07-25T10:00\",\"temperature_2m\":21,\"weather_code\":0}}"
+            )
+        case "air-quality-api.open-meteo.com":
+            return try httpResponse(for: request, json: "{\"current\":{\"us_aqi\":38}}")
+        default:
+            throw URLError(.badURL)
+        }
+    }
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+
+    let result = await service.fetch(config: config)
+    let secondResult = await service.fetch(config: config)
+
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(geocodingRequests, 1)
+        try expectEqual(snapshot.locationName, "Potsdam")
+        try expectEqual(snapshot.longitude, 13.06)
+        try expectEqual(snapshot.latitude, 52.40)
+    case .failure(let error):
+        throw TestFailure(message: "changed place name should resolve again, got \(error)", file: #fileID, line: #line)
+    }
+    switch secondResult {
+    case .success(let snapshot):
+        try expectEqual(geocodingRequests, 1)
+        try expectEqual(snapshot.longitude, 13.06)
+        try expectEqual(snapshot.latitude, 52.40)
+    case .failure(let error):
+        throw TestFailure(message: "resolved name cache should survive a later lookup outage, got \(error)", file: #fileID, line: #line)
+    }
+}
+
+private func testOpenMeteoGeocodingSeparatesNamesAndCoordinates() async throws {
+    let directory = try makeTestDirectory("openmeteo-geocoding-privacy")
+    let store = ConfigStore(configDirectoryURL: directory)
+    var config = AppConfig.default
+    config.weather.location = WeatherLocationConfig(name: "Berlin", longitude: nil, latitude: nil)
+    var geocodingRequests = 0
+    var geocodingReceivedName = false
+    var dataEndpointsReceivedCoordinates = 0
+
+    let client = MockHTTPClient { request in
+        let query = request.url?.query ?? ""
+        switch request.url?.host {
+        case "geocoding-api.open-meteo.com":
+            geocodingRequests += 1
+            geocodingReceivedName = query.contains("name=Berlin")
+                && !query.contains("latitude=")
+                && !query.contains("longitude=")
+            return try httpResponse(
+                for: request,
+                json: "{\"results\":[{\"id\":2950159,\"name\":\"Berlin canonical\",\"latitude\":52.52,\"longitude\":13.41}]}"
+            )
+        case "api.open-meteo.com":
+            if query.contains("latitude=52.52")
+                && query.contains("longitude=13.41")
+                && !query.contains("name=") {
+                dataEndpointsReceivedCoordinates += 1
+            }
+            return try httpResponse(
+                for: request,
+                json: "{\"timezone\":\"Europe/Berlin\",\"current\":{\"time\":\"2026-07-25T10:00\",\"temperature_2m\":20,\"weather_code\":0}}"
+            )
+        case "air-quality-api.open-meteo.com":
+            if query.contains("latitude=52.52")
+                && query.contains("longitude=13.41")
+                && !query.contains("name=") {
+                dataEndpointsReceivedCoordinates += 1
+            }
+            return try httpResponse(for: request, json: "{\"current\":{\"us_aqi\":35}}")
+        default:
+            throw URLError(.badURL)
+        }
+    }
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+
+    _ = await service.fetch(config: config)
+    _ = await service.fetch(config: config)
+
+    try expect(geocodingReceivedName, "geocoding should receive only the configured place name")
+    try expectEqual(geocodingRequests, 1)
+    try expectEqual(dataEndpointsReceivedCoordinates, 4)
 }
 
 private func testQWeatherDailyAndAirQualityFetch() async throws {
@@ -1359,6 +1730,70 @@ private func testQWeatherAirQualityUsesPathParams() async throws {
     // The lat/lon should be embedded in the path, not as query params.
     try expect(path.contains("/airquality/v1/current/39.92/116.41"), "AQI path should embed lat/lon: \(path)")
     try expect(!path.contains("location="), "AQI path should not use location query param")
+}
+
+private func testQWeatherRejectsOpenMeteoCache() async throws {
+    let directory = try makeTestDirectory("qweather-openmeteo-cache")
+    let store = ConfigStore(configDirectoryURL: directory)
+    let base = makeWeatherSnapshot()
+    let openMeteoCache = WeatherSnapshot(
+        provider: .openMeteo,
+        locationName: "Configured Location",
+        locationID: nil,
+        longitude: 116.41,
+        latitude: 39.92,
+        timeZoneIdentifier: "Asia/Shanghai",
+        current: base.current,
+        hourly: base.hourly,
+        daily: base.daily,
+        minutely: [],
+        precipitationSummary: "No minute rain data",
+        airQuality: base.airQuality,
+        attributionURL: "https://open-meteo.com/",
+        updatedAt: base.updatedAt,
+        isCached: false,
+        errorMessage: nil
+    )
+    try writeJSON(openMeteoCache, to: store.weatherCacheURL)
+
+    setenv("GLANCEPANE_QWEATHER_JWT", "test-token", 1)
+    defer { unsetenv("GLANCEPANE_QWEATHER_JWT") }
+    var config = AppConfig.default
+    config.weather.provider = .qweather
+    config.weather.location = WeatherLocationConfig(name: "", longitude: 116.41, latitude: 39.92)
+    config.weather.qweather.apiHost = "https://example.test"
+
+    let client = MockHTTPClient { request in
+        switch request.url?.path {
+        case "/v7/weather/now":
+            return try httpResponse(
+                for: request,
+                json: "{\"code\":\"200\",\"now\":{\"temp\":\"28\",\"text\":\"晴\",\"icon\":\"100\"}}"
+            )
+        case "/v7/weather/24h", "/v7/weather/7d":
+            return try httpResponse(for: request, json: "{\"code\":\"200\"}")
+        case "/v7/minutely/5m":
+            return try httpResponse(for: request, json: "{\"code\":\"204\"}")
+        default:
+            if request.url?.path.contains("/airquality/v1/current/") == true {
+                throw URLError(.timedOut)
+            }
+            throw URLError(.badURL)
+        }
+    }
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+
+    let result = await service.fetch(config: config)
+
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(snapshot.provider, .qweather)
+        try expectEqual(snapshot.current?.condition, "晴")
+        try expectEqual(snapshot.airQuality, nil)
+        try expectEqual(snapshot.timeZoneIdentifier, nil)
+    case .failure(let error):
+        throw TestFailure(message: "QWeather should not inherit Open-Meteo cache, got \(error)", file: #fileID, line: #line)
+    }
 }
 
 private func testCodexUsageFormattingAndHistory() throws {
@@ -3182,6 +3617,7 @@ private func makeWeatherSnapshot() -> WeatherSnapshot {
         locationID: "sample-location",
         longitude: 120,
         latitude: 30,
+        timeZoneIdentifier: nil,
         current: CurrentWeather(
             observedAt: Date(timeIntervalSince1970: 100),
             temperatureCelsius: 28,
@@ -3251,6 +3687,7 @@ private func makeDryWeatherSnapshot() -> WeatherSnapshot {
         locationID: base.locationID,
         longitude: base.longitude,
         latitude: base.latitude,
+        timeZoneIdentifier: base.timeZoneIdentifier,
         current: base.current,
         hourly: base.hourly,
         daily: base.daily,

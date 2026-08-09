@@ -34,7 +34,7 @@ GlancePane 是一个运行在 macOS 副屏上的原生状态面板，适合 `128
 - 配置目录为 `~/.glancepane/`，目录权限为 `0700`。
 - 配置、缓存、备份和导出的配置文件权限为 `0600`。
 - 不缓存 Codex prompt、response、账号邮箱和完整项目路径。
-- Open-Meteo 无需凭证,请求仅发送配置的坐标。
+- Open-Meteo 无需凭证；地点名称会发送到其地理编码 API，解析得到或直接配置的坐标会发送到天气预报和空气质量 API。
 - QWeather JWT 在本机生成，只保存在内存中。
 - Weather 页面隐藏后暂停刷新，减少 API 调用。
 

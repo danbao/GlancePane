@@ -355,14 +355,17 @@ func rain(_ value: Double?) -> String {
 }
 
 extension DateFormatter {
-    static func cached(format: String) -> DateFormatter {
-        let key = "GlancePane.DateFormatter.\(format)" as NSString
+    static func cached(format: String, timeZoneIdentifier: String? = nil) -> DateFormatter {
+        let key = "GlancePane.DateFormatter.\(format).\(timeZoneIdentifier ?? "local")" as NSString
         if let existing = Thread.current.threadDictionary[key] as? DateFormatter {
             return existing
         }
 
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
+        if let timeZoneIdentifier {
+            formatter.timeZone = TimeZone(identifier: timeZoneIdentifier)
+        }
         formatter.dateFormat = format
         Thread.current.threadDictionary[key] = formatter
         return formatter
