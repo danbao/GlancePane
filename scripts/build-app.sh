@@ -52,7 +52,10 @@ swiftc \
 swiftc \
   ${SWIFTC_OPT} \
   -target "${ARCH}-apple-macosx${MIN_MACOS_VERSION}" \
+  "Sources/GlancePane/Services/RelaunchPolicy.swift" \
+  "Sources/GlancePane/Services/SecureFileStore.swift" \
   "Sources/GlancePaneWatchdog/GlancePaneWatchdog.swift" \
+  "Sources/GlancePaneWatchdog/main.swift" \
   -o "${HELPERS_DIR}/GlancePaneWatchdog"
 
 cat > "${LAUNCH_AGENTS_DIR}/dev.danbao.glancepane.watchdog.plist" <<PLIST

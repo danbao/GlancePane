@@ -1,19 +1,20 @@
 import AppKit
-import Darwin
 import Foundation
 
 private let appBundleIdentifier = "dev.danbao.glancepane"
-private let markerURL = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent(".glancepane", isDirectory: true)
-    .appendingPathComponent("suppress-relaunch")
-private let sessionIdentifier = String(audit_session_self())
 
-private func relaunchIsSuppressed() -> Bool {
-    guard let data = try? Data(contentsOf: markerURL),
-          let storedSession = String(data: data, encoding: .utf8) else {
-        return false
+struct WatchdogRelaunchController {
+    let relaunchPolicy: RelaunchPolicy
+    let isAppRunning: () -> Bool
+    let applicationURL: () -> URL?
+    let openApplication: (URL) -> Void
+
+    func ensureAppIsRunning() {
+        guard !relaunchPolicy.isSuppressed else { return }
+        guard !isAppRunning() else { return }
+        guard let appURL = applicationURL() else { return }
+        openApplication(appURL)
     }
-    return storedSession == sessionIdentifier
 }
 
 private func containingAppURL() -> URL? {
@@ -24,18 +25,34 @@ private func containingAppURL() -> URL? {
     return url.pathExtension == "app" ? url : nil
 }
 
-private func ensureAppIsRunning() {
-    guard !relaunchIsSuppressed() else { return }
-    guard NSRunningApplication.runningApplications(withBundleIdentifier: appBundleIdentifier).isEmpty else { return }
-    guard let appURL = containingAppURL() else { return }
-
-    let configuration = NSWorkspace.OpenConfiguration()
-    configuration.activates = false
-    NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, _ in }
+private func makeRelaunchController() -> WatchdogRelaunchController {
+    WatchdogRelaunchController(
+        relaunchPolicy: RelaunchPolicy(
+            configDirectoryURL: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".glancepane", isDirectory: true)
+        ),
+        isAppRunning: {
+            !NSRunningApplication.runningApplications(
+                withBundleIdentifier: appBundleIdentifier
+            ).isEmpty
+        },
+        applicationURL: containingAppURL,
+        openApplication: { appURL in
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false
+            NSWorkspace.shared.openApplication(
+                at: appURL,
+                configuration: configuration
+            ) { _, _ in }
+        }
+    )
 }
 
-ensureAppIsRunning()
-Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
-    ensureAppIsRunning()
+func runWatchdog() {
+    let relaunchController = makeRelaunchController()
+    relaunchController.ensureAppIsRunning()
+    Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+        relaunchController.ensureAppIsRunning()
+    }
+    RunLoop.main.run()
 }
-RunLoop.main.run()
