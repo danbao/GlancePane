@@ -32,6 +32,7 @@ codex-usage-cache.json
 
 # Editors and operating systems
 .DS_Store
+.zcode/
 .idea/
 .vscode/
 *~
