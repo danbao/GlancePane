@@ -487,13 +487,20 @@ private struct DataSettingsView: View {
                 TextField("Symbols", text: Binding(get: { model.marketSymbols }, set: { model.marketSymbols = $0 }))
             }
             Section("Weather") {
+                Picker("Provider", selection: model.binding(\.weather.provider)) {
+                    Text("Open-Meteo (no key needed)").tag(WeatherProvider.openMeteo)
+                    Text("QWeather").tag(WeatherProvider.qweather)
+                }
                 TextField("Location", text: model.binding(\.weather.location.name))
                 TextField("Longitude", value: model.binding(\.weather.location.longitude), format: .number)
                 TextField("Latitude", value: model.binding(\.weather.location.latitude), format: .number)
-                TextField("QWeather API Host", text: model.binding(\.weather.qweather.apiHost))
-                TextField("QWeather Key ID", text: model.binding(\.weather.qweather.keyID))
-                TextField("QWeather Project ID", text: model.binding(\.weather.qweather.projectID))
-                TextField("Private Key Path", text: model.binding(\.weather.qweather.privateKeyPath))
+
+                if model.config.weather.provider == .qweather {
+                    TextField("QWeather API Host", text: model.binding(\.weather.qweather.apiHost))
+                    TextField("QWeather Key ID", text: model.binding(\.weather.qweather.keyID))
+                    TextField("QWeather Project ID", text: model.binding(\.weather.qweather.projectID))
+                    TextField("Private Key Path", text: model.binding(\.weather.qweather.privateKeyPath))
+                }
             }
             Section("Configuration") {
                 HStack {

@@ -20,7 +20,9 @@ When enabled, the Agents page calls read-only Codex app-server usage endpoints a
 ## External Services
 
 - Yahoo Finance receives requests for configured market symbols.
-- QWeather receives the configured location and weather requests.
+- The active weather provider receives only the location data needed for weather requests:
+  - **Open-Meteo** (default) is a free, keyless API. A configured place name is sent to `geocoding-api.open-meteo.com`; the resulting or configured latitude/longitude is sent to `api.open-meteo.com` and `air-quality-api.open-meteo.com`.
+  - **QWeather** receives the configured location and weather/air-quality requests.
 
 QWeather private keys remain local. GlancePane signs JWTs on-device and caches generated tokens only in memory.
 

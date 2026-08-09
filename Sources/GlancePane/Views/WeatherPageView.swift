@@ -8,14 +8,16 @@ struct WeatherPageView: View {
     let scale: CGFloat
 
     private var hasWeatherData: Bool {
-        snapshot.current != nil || !snapshot.hourly.isEmpty || !snapshot.minutely.isEmpty
+        snapshot.current != nil || !snapshot.hourly.isEmpty || !snapshot.minutely.isEmpty || !snapshot.daily.isEmpty || snapshot.airQuality != nil
     }
 
     var body: some View {
         GeometryReader { proxy in
             let gap = DashboardLayout.gap * scale
-            let topHeight = (proxy.size.height - gap) * 0.61
-            let bottomHeight = max(0, proxy.size.height - topHeight - gap)
+            let usableHeight = proxy.size.height - gap * 2
+            let topHeight = usableHeight * 0.56
+            let midHeight = usableHeight * 0.22
+            let bottomHeight = max(0, usableHeight - topHeight - midHeight)
 
             if hasWeatherData {
                 VStack(spacing: gap) {
@@ -26,7 +28,22 @@ struct WeatherPageView: View {
                     }
                     .frame(height: topHeight)
 
-                    WeatherHourlyStrip(hourly: snapshot.hourly, unit: config.appearance.units.temperature, theme: theme, scale: scale)
+                    WeatherDailyStrip(
+                        daily: snapshot.daily,
+                        timeZoneIdentifier: snapshot.timeZoneIdentifier,
+                        unit: config.appearance.units.temperature,
+                        theme: theme,
+                        scale: scale
+                    )
+                        .frame(height: midHeight)
+
+                    WeatherHourlyStrip(
+                        hourly: snapshot.hourly,
+                        timeZoneIdentifier: snapshot.timeZoneIdentifier,
+                        unit: config.appearance.units.temperature,
+                        theme: theme,
+                        scale: scale
+                    )
                         .frame(height: bottomHeight)
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height)
@@ -90,6 +107,9 @@ private struct WeatherHeroPanel: View {
                     WeatherMetricBadge(label: "HUMID", value: percent(current?.humidityPercent), color: theme.green, theme: theme, scale: scale)
                     WeatherMetricBadge(label: "RAIN", value: rain(current?.precipitationMillimeters), color: theme.amber, theme: theme, scale: scale)
                     WeatherMetricBadge(label: "WIND KM/H", value: windBadgeText, color: theme.secondaryText, theme: theme, scale: scale)
+                    if let airQuality = snapshot.airQuality {
+                        WeatherMetricBadge(label: "AQI", value: aqiValue(airQuality), color: AirQualityPalette.color(for: airQuality.aqi, theme: theme), theme: theme, scale: scale)
+                    }
                 }
 
                 if let error = snapshot.errorMessage, !error.isEmpty {
@@ -120,13 +140,24 @@ private struct WeatherHeroPanel: View {
 
     private var observedText: String {
         guard let observedAt = current?.observedAt else {
-            return DateFormatter.cached(format: "HH:mm:ss").string(from: snapshot.updatedAt)
+            return DateFormatter.cached(
+                format: "HH:mm:ss",
+                timeZoneIdentifier: snapshot.timeZoneIdentifier
+            ).string(from: snapshot.updatedAt)
         }
-        return DateFormatter.cached(format: "HH:mm").string(from: observedAt)
+        return DateFormatter.cached(
+            format: "HH:mm",
+            timeZoneIdentifier: snapshot.timeZoneIdentifier
+        ).string(from: observedAt)
     }
 
     private func formattedTemperature(_ value: Double?) -> String {
         value?.formattedTemperature(unit: unit) ?? "N/A"
+    }
+
+    private func aqiValue(_ airQuality: AirQuality) -> String {
+        guard let aqi = airQuality.aqi else { return "N/A" }
+        return "\(Int(aqi.rounded()))"
     }
 }
 
@@ -211,7 +242,12 @@ private struct WeatherNowcastPanel: View {
                 if !minutely.isEmpty {
                     WeatherMinutelyRainChart(points: minutely, theme: theme, scale: scale)
                 } else if !snapshot.hourly.isEmpty {
-                    WeatherHourlyRainChart(hourly: Array(snapshot.hourly.prefix(12)), theme: theme, scale: scale)
+                    WeatherHourlyRainChart(
+                        hourly: Array(snapshot.hourly.prefix(12)),
+                        timeZoneIdentifier: snapshot.timeZoneIdentifier,
+                        theme: theme,
+                        scale: scale
+                    )
                 } else {
                     Text("NO RAIN DATA")
                         .font(.system(size: 36 * scale, weight: .black, design: .rounded))
@@ -234,7 +270,7 @@ private struct WeatherNowcastPanel: View {
     }
 
     private var attribution: some View {
-        Text("QWEATHER \(snapshot.attributionURL ?? "https://www.qweather.com")")
+        Text("\(snapshot.provider.attributionPrefix) \(snapshot.attributionURL ?? "")")
             .font(.system(size: DashboardTypography.attribution * scale, weight: .black, design: .monospaced))
             .foregroundStyle(theme.secondaryText.opacity(0.75))
             .lineLimit(1)
@@ -312,6 +348,7 @@ private struct WeatherMinutelyRainChart: View {
 
 private struct WeatherHourlyRainChart: View {
     let hourly: [HourlyWeather]
+    let timeZoneIdentifier: String?
     let theme: ScreenTheme
     let scale: CGFloat
 
@@ -326,7 +363,12 @@ private struct WeatherHourlyRainChart: View {
                         RoundedRectangle(cornerRadius: 3 * scale)
                             .fill(precipitation > 0 ? theme.blue : theme.secondaryText.opacity(0.22))
                             .frame(height: max(5 * scale, proxy.size.height * 0.72 * CGFloat(precipitation / maxRain)))
-                        Text(DateFormatter.cached(format: "HH").string(from: item.forecastAt))
+                        Text(
+                            DateFormatter.cached(
+                                format: "HH",
+                                timeZoneIdentifier: timeZoneIdentifier
+                            ).string(from: item.forecastAt)
+                        )
                             .font(.system(size: DashboardTypography.chartTick * scale, weight: .black, design: .monospaced))
                             .foregroundStyle(theme.secondaryText)
                     }
@@ -339,8 +381,87 @@ private struct WeatherHourlyRainChart: View {
     }
 }
 
+private struct WeatherDailyStrip: View {
+    let daily: [DailyWeather]
+    let timeZoneIdentifier: String?
+    let unit: TemperatureUnit
+    let theme: ScreenTheme
+    let scale: CGFloat
+
+    var body: some View {
+        SectionPanel(title: "7-Day", theme: theme, scale: scale) {
+            if daily.isEmpty {
+                Text("WAITING FOR DAILY FORECAST")
+                    .font(.system(size: 24 * scale, weight: .black, design: .rounded))
+                    .foregroundStyle(theme.secondaryText)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack(spacing: 8 * scale) {
+                    ForEach(Array(daily.prefix(7))) { item in
+                        WeatherDailyForecastTile(
+                            item: item,
+                            timeZoneIdentifier: timeZoneIdentifier,
+                            unit: unit,
+                            theme: theme,
+                            scale: scale
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+}
+
+private struct WeatherDailyForecastTile: View {
+    let item: DailyWeather
+    let timeZoneIdentifier: String?
+    let unit: TemperatureUnit
+    let theme: ScreenTheme
+    let scale: CGFloat
+
+    var body: some View {
+        VStack(spacing: 4 * scale) {
+            Text(
+                DateFormatter.cached(
+                    format: "EEE",
+                    timeZoneIdentifier: timeZoneIdentifier
+                ).string(from: item.date)
+            )
+                .font(.system(size: 20 * scale, weight: .black, design: .monospaced))
+                .foregroundStyle(theme.secondaryText)
+
+            WeatherIconView(iconCode: item.icon, condition: item.condition, size: 46 * scale, theme: theme)
+
+            HStack(alignment: .firstTextBaseline, spacing: 2 * scale) {
+                Text(item.tempMax?.formattedTemperature(unit: unit) ?? "N/A")
+                    .font(.system(size: 34 * scale, weight: .black, design: .monospaced))
+                    .foregroundStyle(theme.primaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                Text(item.tempMin?.formattedTemperature(unit: unit) ?? "N/A")
+                    .font(.system(size: 24 * scale, weight: .black, design: .monospaced))
+                    .foregroundStyle(theme.secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+
+            Text(percent(item.precipitationProbabilityPercent))
+                .font(.system(size: 16 * scale, weight: .black, design: .monospaced))
+                .foregroundStyle((item.precipitationProbabilityPercent ?? 0) >= 40 ? theme.blue : theme.secondaryText)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6 * scale)
+        .padding(.vertical, 4 * scale)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.tileBackground)
+        .clipShape(RoundedRectangle(cornerRadius: DashboardLayout.panelCornerRadius * scale))
+    }
+}
+
 private struct WeatherHourlyStrip: View {
     let hourly: [HourlyWeather]
+    let timeZoneIdentifier: String?
     let unit: TemperatureUnit
     let theme: ScreenTheme
     let scale: CGFloat
@@ -355,7 +476,13 @@ private struct WeatherHourlyStrip: View {
             } else {
                 HStack(spacing: 8 * scale) {
                     ForEach(Array(hourly.prefix(8))) { item in
-                        WeatherHourlyForecastTile(item: item, unit: unit, theme: theme, scale: scale)
+                        WeatherHourlyForecastTile(
+                            item: item,
+                            timeZoneIdentifier: timeZoneIdentifier,
+                            unit: unit,
+                            theme: theme,
+                            scale: scale
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -366,13 +493,19 @@ private struct WeatherHourlyStrip: View {
 
 private struct WeatherHourlyForecastTile: View {
     let item: HourlyWeather
+    let timeZoneIdentifier: String?
     let unit: TemperatureUnit
     let theme: ScreenTheme
     let scale: CGFloat
 
     var body: some View {
         VStack(spacing: 4 * scale) {
-            Text(DateFormatter.cached(format: "HH:mm").string(from: item.forecastAt))
+            Text(
+                DateFormatter.cached(
+                    format: "HH:mm",
+                    timeZoneIdentifier: timeZoneIdentifier
+                ).string(from: item.forecastAt)
+            )
                 .font(.system(size: 20 * scale, weight: .black, design: .monospaced))
                 .foregroundStyle(theme.secondaryText)
 
@@ -448,6 +581,15 @@ private struct WeatherIconView: View {
 
 enum WeatherIconMapper {
     static func symbolName(for iconCode: String?, condition: String?) -> String {
+        // Open-Meteo stores WMO codes with a "wmo:" prefix to distinguish them
+        // from QWeather numeric icon codes.
+        if let iconCode, iconCode.hasPrefix("wmo:") {
+            let raw = iconCode.dropFirst(4)
+            if let wmo = Int(raw) {
+                return symbolName(wmoCode: wmo)
+            }
+        }
+
         guard let code = iconCode.flatMap(Int.init) else { return symbolFromCondition(condition) }
 
         switch code {
@@ -472,14 +614,53 @@ enum WeatherIconMapper {
     }
 
     private static func symbolFromCondition(_ condition: String?) -> String {
-        let text = condition ?? ""
+        let text = (condition ?? "").lowercased()
+        // Chinese keywords (QWeather)
         if text.contains("雷") { return "cloud.bolt.rain.fill" }
         if text.contains("雨") { return "cloud.rain.fill" }
         if text.contains("雪") { return "cloud.snow.fill" }
         if text.contains("雾") || text.contains("霾") || text.contains("沙") || text.contains("尘") { return "cloud.fog.fill" }
         if text.contains("晴") { return "sun.max.fill" }
         if text.contains("云") || text.contains("阴") { return "cloud.fill" }
+        // English keywords (Open-Meteo)
+        if text.contains("thunderstorm") { return "cloud.bolt.rain.fill" }
+        if text.contains("snow") || text.contains("grains") { return "cloud.snow.fill" }
+        if text.contains("drizzle") { return "cloud.drizzle.fill" }
+        if text.contains("rain") || text.contains("showers") { return "cloud.rain.fill" }
+        if text.contains("fog") { return "cloud.fog.fill" }
+        if text.contains("clear") { return "sun.max.fill" }
+        if text.contains("cloud") || text.contains("overcast") { return "cloud.fill" }
         return "questionmark.circle.fill"
+    }
+
+    /// Maps WMO weather interpretation codes (used by Open-Meteo) to SF Symbols.
+    static func symbolName(wmoCode code: Int) -> String {
+        switch code {
+        case 0: return "sun.max.fill"
+        case 1: return "cloud.sun.fill"
+        case 2: return "cloud.sun.fill"
+        case 3: return "cloud.fill"
+        case 45, 48: return "cloud.fog.fill"
+        case 51, 53, 55, 56, 57: return "cloud.drizzle.fill"
+        case 61, 63, 80, 81: return "cloud.rain.fill"
+        case 65, 66, 67, 82: return "cloud.heavyrain.fill"
+        case 71, 73, 75, 77, 85, 86: return "cloud.snow.fill"
+        case 95, 96, 99: return "cloud.bolt.rain.fill"
+        default: return "questionmark.circle.fill"
+        }
+    }
+}
+
+enum AirQualityPalette {
+    /// Maps a US AQI value to a theme color. Returns `nil` (no color hint) when
+    /// there is no AQI value yet.
+    static func color(for aqi: Double?, theme: ScreenTheme) -> Color {
+        guard let aqi else { return theme.secondaryText }
+        switch aqi {
+        case ..<51: return theme.green
+        case ..<101: return theme.amber
+        default: return theme.red
+        }
     }
 }
 
@@ -525,7 +706,7 @@ private struct WeatherSetupPanel: View {
             VStack(alignment: .leading, spacing: 22 * scale) {
                 StatusPill(title: status.title.uppercased(), color: theme.amber, scale: scale)
 
-                Text("QWEATHER SETUP")
+                Text(setupTitle)
                     .font(.system(size: 68 * scale, weight: .black, design: .rounded))
                     .foregroundStyle(theme.primaryText)
 
@@ -534,11 +715,15 @@ private struct WeatherSetupPanel: View {
                     .foregroundStyle(theme.accent)
 
                 VStack(alignment: .leading, spacing: 10 * scale) {
-                    InlineMetricRow(label: "HOST", value: config.weather.qweather.apiHost.isEmpty ? "MISSING" : "READY", color: config.weather.qweather.apiHost.isEmpty ? theme.red : theme.green, scale: scale)
-                    InlineMetricRow(label: "KID", value: hasKeyID ? "READY" : "MISSING", color: hasKeyID ? theme.green : theme.red, scale: scale)
-                    InlineMetricRow(label: "SUB", value: hasProjectID ? "READY" : "MISSING", color: hasProjectID ? theme.green : theme.red, scale: scale)
-                    InlineMetricRow(label: "KEY", value: hasPrivateKey ? "READY" : "MISSING", color: hasPrivateKey ? theme.green : theme.red, scale: scale)
+                    InlineMetricRow(label: "LOCATION", value: config.weather.location.isConfigured ? "READY" : "MISSING", color: config.weather.location.isConfigured ? theme.green : theme.red, scale: scale)
                     InlineMetricRow(label: "CONFIG", value: "~/.glancepane/config.json", color: theme.secondaryText, scale: scale)
+
+                    if config.weather.provider == .qweather {
+                        InlineMetricRow(label: "HOST", value: config.weather.qweather.apiHost.isEmpty ? "MISSING" : "READY", color: config.weather.qweather.apiHost.isEmpty ? theme.red : theme.green, scale: scale)
+                        InlineMetricRow(label: "KID", value: hasKeyID ? "READY" : "MISSING", color: hasKeyID ? theme.green : theme.red, scale: scale)
+                        InlineMetricRow(label: "SUB", value: hasProjectID ? "READY" : "MISSING", color: hasProjectID ? theme.green : theme.red, scale: scale)
+                        InlineMetricRow(label: "KEY", value: hasPrivateKey ? "READY" : "MISSING", color: hasPrivateKey ? theme.green : theme.red, scale: scale)
+                    }
                 }
 
                 if let error = snapshot.errorMessage, !error.isEmpty {
@@ -550,6 +735,13 @@ private struct WeatherSetupPanel: View {
                 }
                 Spacer(minLength: 0)
             }
+        }
+    }
+
+    private var setupTitle: String {
+        switch config.weather.provider {
+        case .openMeteo: return "OPEN-METEO SETUP"
+        case .qweather: return "QWEATHER SETUP"
         }
     }
 

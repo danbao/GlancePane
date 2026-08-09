@@ -26,3 +26,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Open-Meteo
+
+Weather and air-quality data for the Open-Meteo provider is provided by
+[Open-Meteo](https://open-meteo.com/) under the
+[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)
+license. Air-quality data is sourced from the Copernicus Atmosphere Monitoring
+Service (CAMS).
