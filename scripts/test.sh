@@ -15,6 +15,7 @@ test -s "${BUILD_DIR}/AppIcon.icns"
 
 swiftc \
   $(find "Sources/GlancePane" -name '*.swift' ! -name 'GlancePaneMain.swift' | sort) \
+  $(find "Sources/GlancePaneWatchdog" -name '*.swift' ! -name 'main.swift' | sort) \
   $(find "Tests/GlancePaneTests" -name '*.swift' | sort) \
   -o "${BINARY_PATH}"
 

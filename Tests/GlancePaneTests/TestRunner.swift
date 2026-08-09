@@ -24,9 +24,24 @@ struct TestCase {
     }
 }
 
+private let relaunchPolicyChildMode = "--check-relaunch-suppression"
+
+private func exitAfterRelaunchPolicyChildCheckIfRequested() {
+    let arguments = CommandLine.arguments
+    guard arguments.count == 3, arguments[1] == relaunchPolicyChildMode else {
+        return
+    }
+
+    let directory = URL(fileURLWithPath: arguments[2], isDirectory: true)
+    let policy = RelaunchPolicy(configDirectoryURL: directory)
+    exit(policy.isSuppressed ? 0 : 1)
+}
+
 @main
 struct GlancePaneTestRunner {
     static func main() async {
+        exitAfterRelaunchPolicyChildCheckIfRequested()
+
         let tests = [
             TestCase("default config writes grouped schema") {
                 try testDefaultConfigWritesGroupedSchema()
@@ -192,6 +207,9 @@ struct GlancePaneTestRunner {
             },
             TestCase("relaunch policy distinguishes quit from crash") {
                 try testRelaunchPolicySuppression()
+            },
+            TestCase("watchdog relaunches crashes but not explicit quits") {
+                try testWatchdogRelaunchDecision()
             },
             TestCase("network probe is injectable and optional") {
                 try await testNetworkProbeIsInjectableAndOptional()
@@ -1773,15 +1791,82 @@ private func testLoginItemMigratesLegacyRegistration() throws {
 
 private func testRelaunchPolicySuppression() throws {
     let directory = try makeTestDirectory("relaunch-policy")
-    let policy = RelaunchPolicy(configDirectoryURL: directory, sessionIdentifier: "session-a")
+    let policy = RelaunchPolicy(
+        configDirectoryURL: directory,
+        sessionIdentifier: 41
+    )
 
     try expect(!policy.isSuppressed, "a fresh installation should permit relaunch")
     try policy.suppress()
     try expect(policy.isSuppressed, "an explicit quit should suppress watchdog relaunch")
-    let nextLoginPolicy = RelaunchPolicy(configDirectoryURL: directory, sessionIdentifier: "session-b")
-    try expect(!nextLoginPolicy.isSuppressed, "quit suppression must not survive a new login session")
+    try expectEqual(posixPermissions(at: policy.markerURL), 0o600)
+    try expectEqual(posixPermissions(at: directory), 0o700)
+    let watchdogPolicy = RelaunchPolicy(
+        configDirectoryURL: directory,
+        sessionIdentifier: 41
+    )
+    try expect(
+        watchdogPolicy.isSuppressed,
+        "the watchdog should recognize an explicit quit written by another process"
+    )
+    let nextLoginPolicy = RelaunchPolicy(
+        configDirectoryURL: directory,
+        sessionIdentifier: 42
+    )
+    try expect(!nextLoginPolicy.isSuppressed, "quit suppression must not survive a new login")
     policy.resume()
     try expect(!policy.isSuppressed, "a manual launch should resume watchdog protection")
+
+    try SecureFileStore.write(Data("not-a-marker".utf8), to: policy.markerURL)
+    try expect(!policy.isSuppressed, "a corrupt marker should permit crash recovery")
+    policy.resume()
+
+    let crossProcessDirectory = try makeTestDirectory("relaunch-policy-cross-process")
+    let livePolicy = RelaunchPolicy(configDirectoryURL: crossProcessDirectory)
+    try livePolicy.suppress()
+
+    let watchdogProcess = Process()
+    watchdogProcess.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+    watchdogProcess.arguments = [relaunchPolicyChildMode, crossProcessDirectory.path]
+    watchdogProcess.standardOutput = FileHandle.nullDevice
+    watchdogProcess.standardError = FileHandle.nullDevice
+    try watchdogProcess.run()
+    watchdogProcess.waitUntilExit()
+    try expect(
+        watchdogProcess.terminationStatus == 0,
+        "a separate watchdog process should recognize the app's audit session"
+    )
+}
+
+private func testWatchdogRelaunchDecision() throws {
+    let directory = try makeTestDirectory("watchdog-relaunch")
+    let policy = RelaunchPolicy(configDirectoryURL: directory, sessionIdentifier: 41)
+    try policy.suppress()
+
+    var openCalls = 0
+    let appURL = directory.appendingPathComponent("GlancePane.app", isDirectory: true)
+    let watchdog = WatchdogRelaunchController(
+        relaunchPolicy: policy,
+        isAppRunning: { false },
+        applicationURL: { appURL },
+        openApplication: { _ in openCalls += 1 }
+    )
+
+    watchdog.ensureAppIsRunning()
+    try expectEqual(openCalls, 0)
+
+    policy.resume()
+    watchdog.ensureAppIsRunning()
+    try expectEqual(openCalls, 1)
+
+    let runningWatchdog = WatchdogRelaunchController(
+        relaunchPolicy: policy,
+        isAppRunning: { true },
+        applicationURL: { appURL },
+        openApplication: { _ in openCalls += 1 }
+    )
+    runningWatchdog.ensureAppIsRunning()
+    try expectEqual(openCalls, 1)
 }
 
 @MainActor
