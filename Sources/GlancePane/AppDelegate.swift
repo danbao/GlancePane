@@ -451,27 +451,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleClickNavigation() {
         guard let model = dashboardModel else { return }
         model.recordActivity()
-        model.config.interaction.clickNavigationEnabled.toggle()
-        configStore.save(model.config)
-        applyWindowInteraction()
-        updateClickShieldFrame()
-        updateStatusMenu()
+        var config = model.config
+        config.interaction.clickNavigationEnabled.toggle()
+        applySettingsConfig(config)
     }
 
     @objc private func toggleAutoPageRotation() {
         guard let model = dashboardModel else { return }
         model.recordActivity()
-        model.config.pages.rotation.enabled.toggle()
-        configStore.save(model.config)
-        updateStatusMenu()
+        var config = model.config
+        config.pages.rotation.enabled.toggle()
+        applySettingsConfig(config)
     }
 
     @objc private func reloadConfig() {
         let config = configStore.load()
-        dashboardModel?.apply(config: config)
-        applyWindowInteraction()
-        updateClickShieldFrame()
-        requestWindowReposition(reason: "config reloaded")
+        applyModelConfig(config)
         refreshSettingsWindow()
     }
 
@@ -539,11 +534,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func applySettingsConfig(_ config: AppConfig) {
         let normalized = config.normalized()
+        guard normalized != dashboardModel?.config else { return }
         configStore.save(normalized)
-        dashboardModel?.apply(config: normalized)
-        applyWindowInteraction()
-        updateClickShieldFrame()
-        requestWindowReposition(reason: "settings changed")
+        applyModelConfig(normalized)
+    }
+
+    private func applyModelConfig(_ config: AppConfig) {
+        guard let effects = dashboardModel?.apply(config: config) else { return }
+        if effects.updateInteraction {
+            applyWindowInteraction()
+            updateClickShieldFrame()
+        }
+        if effects.repositionWindow {
+            requestWindowReposition(reason: "display settings changed")
+        }
+        updateStatusMenu()
     }
 
     private func refreshSettingsWindow() {

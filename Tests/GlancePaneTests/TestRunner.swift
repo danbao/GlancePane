@@ -124,6 +124,15 @@ struct GlancePaneTestRunner {
             TestCase("weather config changes reject unrelated cache before and after failure") {
                 try await testWeatherConfigChangesRejectCache()
             },
+            TestCase("appearance changes preserve live weather and protection state") {
+                try await testAppearanceChangesPreserveRunningState()
+            },
+            TestCase("configuration effects isolate display and interaction changes") {
+                try await testConfigurationEffects()
+            },
+            TestCase("configuration changes preserve unrelated Codex connections") {
+                try await testConfigPreservesCodexConnection()
+            },
             TestCase("weather resumes after hiding an in-flight request") {
                 try await testWeatherResumesAfterHidingRequest()
             },
@@ -3025,6 +3034,82 @@ private func testWeatherConfigChangesRejectCache() async throws {
         )
         try expectEqual(restarted.weatherSnapshot.current, nil)
     }
+}
+
+@MainActor
+private func testAppearanceChangesPreserveRunningState() async throws {
+    let store = ConfigStore(configDirectoryURL: try makeTestDirectory("differential-config"))
+    let client = ControlledWeatherHTTPClient()
+    let model = makeWeatherTestModel(store: store, client: client)
+    defer { model.stop() }
+    model.start()
+    try await eventually { await client.forecastCount == 1 }
+    await client.completeForecast(1, temperature: 20)
+    try await eventually { model.weatherStatus == .live }
+    model.recordActivity(at: Date().addingTimeInterval(-10_000))
+    model.handleSystemWake()
+    try expect(model.isResting, "fixture should enter the scheduled rest period")
+    let previous = model.weatherSnapshot
+    var config = model.config
+    config.appearance.theme = .terminal
+    model.apply(config: config)
+    try expectEqual(model.weatherStatus, .live)
+    try expectEqual(model.weatherSnapshot, previous)
+    try expect(model.isResting, "appearance changes must preserve the rest period")
+}
+
+@MainActor
+private func testConfigurationEffects() async throws {
+    let store = ConfigStore(configDirectoryURL: try makeTestDirectory("config-effects"))
+    let model = makeWeatherTestModel(store: store, client: MockHTTPClient { _ in throw URLError(.timedOut) })
+    defer { model.stop() }
+    model.start()
+    try expectEqual(model.apply(config: model.config), DashboardConfigEffects())
+    var config = model.config
+    config.appearance.theme = .graphite
+    try expectEqual(model.apply(config: config), DashboardConfigEffects())
+    config.display.targetID = "synthetic-display"
+    try expectEqual(model.apply(config: config), DashboardConfigEffects(repositionWindow: true))
+    config.interaction.clickNavigationEnabled.toggle()
+    try expectEqual(model.apply(config: config), DashboardConfigEffects(updateInteraction: true))
+}
+
+@MainActor
+private func testConfigPreservesCodexConnection() async throws {
+    let directory = try makeTestDirectory("config-codex-connection")
+    let store = ConfigStore(configDirectoryURL: directory)
+    let client = MockCodexAccountClient(
+        account: makeCodexAccountUsage(endingAt: Date()),
+        rateLimits: CodexRateLimits(planType: nil, isUnlimited: false, hasCredits: false, creditBalance: nil, primary: nil, secondary: nil)
+    )
+    var config = AppConfig.default
+    config.market.enabled = false
+    config.pages.enabled = [.clock, .agents]
+    config.agents.codex.codexHomePath = directory.path
+    config.system.enabledGroups = []
+    config.system.processes.enabled = false
+    let model = DashboardModel(
+        config: config, configStore: store, displayManager: DisplayManager(),
+        codexUsageServiceFactory: {
+            CodexUsageService(cacheURL: store.codexUsageCacheURL, makeClient: { _ in client },
+                resolveExecutable: { _, _ in URL(fileURLWithPath: "/tmp/mock-codex") })
+        }
+    )
+    model.start()
+    defer { model.stop() }
+    try await eventually { model.codexUsage.status == .live }
+    config.appearance.theme = .terminal
+    model.apply(config: config)
+    try expectEqual(model.codexUsage.status, .live)
+    config.weather.location.name = "Synthetic Location"
+    model.apply(config: config)
+    let unchanged = await client.callCounts()
+    try expectEqual(unchanged.starts, 1)
+    try expectEqual(unchanged.stops, 0)
+    config.pages.enabled.remove(.agents)
+    model.apply(config: config)
+    try expectEqual(model.codexUsage.status, .disabled)
+    try await eventually { await client.callCounts().stops > 0 }
 }
 
 @MainActor
