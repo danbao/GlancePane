@@ -9,7 +9,7 @@ the public-tree audit, packaging, and secret scanning pass.
 | 2 | Weather cache identity and freshness | Reject another location/provider at every read; preserve timestamps on complete failure; retain partial fallback. | Implemented |
 | 3 | Differential configuration updates | Appearance edits preserve feeds and protection timers; only changed feeds restart; only display changes reposition the window. | Implemented |
 | 4 | Window recovery scheduling | A failed first display retry preserves later retries; lock/sleep suspends recovery; hidden windows ignore pointer input. | Implemented |
-| 5 | Background system sampling | Slow collection does not block the main actor; collectors remain serial; stopped or superseded samples cannot publish. | Planned |
+| 5 | Background system sampling | Slow collection does not block the main actor; collectors remain serial; stopped or superseded samples cannot publish. | Implemented |
 | 6 | Dashboard rendering regressions | Test the production composition, backgrounds, scaling, offsets and rest overlay; group tests by domain. | Planned |
 
 Keep the configuration schema, cache privacy, native UI behavior, and offline

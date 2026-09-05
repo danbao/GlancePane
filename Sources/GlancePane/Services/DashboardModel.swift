@@ -25,7 +25,7 @@ final class DashboardModel: ObservableObject {
 
     private let configStore: ConfigStore
     private let displayManager: DisplayManager
-    private let metricsService: SystemMetricsService
+    private let metricsService: any SystemMetricsSampling
     private let stockService: StockService
     private let weatherService: WeatherService
     private let networkProbeService: NetworkProbing
@@ -33,12 +33,14 @@ final class DashboardModel: ObservableObject {
     private let historyStore = MetricHistoryStore()
     private let healthEvaluator = HealthEvaluator()
     private var timer: Timer?
+    private var metricsTask: Task<Void, Never>?
     private var stockTask: Task<Void, Never>?
     private var weatherTask: Task<Void, Never>?
     private var networkProbeTask: Task<Void, Never>?
     private var codexTask: Task<Void, Never>?
     private var codexUsageService: CodexUsageService?
     private var stockRequestGeneration = 0
+    private var metricsRequestGeneration = 0
     private var weatherRequestGeneration = 0
     private var networkProbeGeneration = 0
     private var codexRequestGeneration = 0
@@ -59,7 +61,7 @@ final class DashboardModel: ObservableObject {
         config: AppConfig,
         configStore: ConfigStore,
         displayManager: DisplayManager,
-        metricsService: SystemMetricsService = SystemMetricsService(),
+        metricsService: any SystemMetricsSampling = SystemMetricsService(),
         stockService: StockService? = nil,
         weatherService: WeatherService? = nil,
         networkProbeService: NetworkProbing = NetworkProbeService(),
@@ -129,6 +131,7 @@ final class DashboardModel: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        cancelSystemMetricsRefresh()
         cancelStockRefresh()
         cancelWeatherRefresh()
         cancelNetworkProbe()
@@ -194,7 +197,7 @@ final class DashboardModel: ObservableObject {
             lastAutoPageRotationDate = Date()
         }
         if previous.system != config.system {
-            tick()
+            tick(forceSystemMetrics: true)
         }
         return effects
     }
@@ -218,8 +221,25 @@ final class DashboardModel: ObservableObject {
     }
 
     func handleSystemWake() {
-        metricsService.handleSystemWake()
-        tick()
+        currentDate = Date()
+        updateBurnInProtection(now: currentDate)
+        updateAutoPageRotation(now: currentDate)
+        cancelSystemMetricsRefresh()
+        metricsRequestGeneration &+= 1
+        let generation = metricsRequestGeneration
+        let requestConfig = config
+        let sampledAt = Date()
+        metricsTask = Task { [weak self] in
+            guard let self else { return }
+            await metricsService.handleSystemWake()
+            let nextSnapshot = await metricsService.sample(config: requestConfig, force: true, at: sampledAt)
+            publishSystemSnapshot(
+                nextSnapshot,
+                config: requestConfig,
+                sampledAt: sampledAt,
+                generation: generation
+            )
+        }
     }
 
     func showNextPage() {
@@ -317,19 +337,64 @@ final class DashboardModel: ObservableObject {
         dimOpacity = 0
     }
 
-    private func tick() {
+    private func tick(forceSystemMetrics: Bool = false) {
         currentDate = Date()
-        var nextSnapshot = metricsService.sample(config: config)
-        nextSnapshot.network.latencyMilliseconds = config.system.networkQuality.enabled ? latestNetworkLatency : nil
-        nextSnapshot.health = healthEvaluator.evaluate(
-            snapshot: nextSnapshot,
-            thresholds: config.system.thresholds,
-            at: currentDate
-        )
-        snapshot = nextSnapshot
-        history = historyStore.record(snapshot: nextSnapshot, config: config.system.history, at: currentDate)
         updateBurnInProtection(now: currentDate)
         updateAutoPageRotation(now: currentDate)
+        refreshSystemMetrics(force: forceSystemMetrics, at: currentDate)
+    }
+
+    private func refreshSystemMetrics(force: Bool, at sampledAt: Date) {
+        if metricsTask != nil {
+            guard force else { return }
+            cancelSystemMetricsRefresh()
+        }
+
+        metricsRequestGeneration &+= 1
+        let generation = metricsRequestGeneration
+        let requestConfig = config
+        metricsTask = Task { [weak self] in
+            guard let self else { return }
+            let nextSnapshot = await metricsService.sample(
+                config: requestConfig,
+                force: force,
+                at: sampledAt
+            )
+            publishSystemSnapshot(
+                nextSnapshot,
+                config: requestConfig,
+                sampledAt: sampledAt,
+                generation: generation
+            )
+        }
+    }
+
+    private func publishSystemSnapshot(
+        _ sampledSnapshot: SystemSnapshot,
+        config requestConfig: AppConfig,
+        sampledAt: Date,
+        generation: Int
+    ) {
+        guard !Task.isCancelled,
+              generation == metricsRequestGeneration,
+              config.system == requestConfig.system else { return }
+
+        var nextSnapshot = sampledSnapshot
+        nextSnapshot.network.latencyMilliseconds = requestConfig.system.networkQuality.enabled ? latestNetworkLatency : nil
+        nextSnapshot.health = healthEvaluator.evaluate(
+            snapshot: nextSnapshot,
+            thresholds: requestConfig.system.thresholds,
+            at: sampledAt
+        )
+        snapshot = nextSnapshot
+        history = historyStore.record(snapshot: nextSnapshot, config: requestConfig.system.history, at: sampledAt)
+        metricsTask = nil
+    }
+
+    private func cancelSystemMetricsRefresh() {
+        metricsRequestGeneration &+= 1
+        metricsTask?.cancel()
+        metricsTask = nil
     }
 
     private func refreshNetworkQuality(force: Bool) {
