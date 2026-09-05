@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private weak var launchAtLoginMenuItem: NSMenuItem?
     private weak var openLoginSettingsMenuItem: NSMenuItem?
     private var startupDisplayRetryTasks: [Task<Void, Never>] = []
+    private var loginItemPreparationTask: Task<Void, Never>?
     private var localMouseMonitor: Any?
     private var globalMouseMonitor: Any?
     private var clickShield: MouseClickShield?
@@ -40,10 +41,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         FontRegistry.registerBundledFonts()
 
         RelaunchPolicy(configDirectoryURL: configStore.configDirectoryURL).resume()
-        do {
-            try loginItemService.prepareForLaunch()
-        } catch {
-            Self.logger.error("Could not migrate login item: \(error.localizedDescription, privacy: .public)")
+        loginItemPreparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.loginItemService.prepareForLaunch()
+            } catch {
+                Self.logger.error("Could not prepare login item: \(error.localizedDescription, privacy: .private)")
+            }
+            self.settingsWindowController?.viewModel.updateLoginStatus(self.loginItemService.status)
+            self.updateStatusMenu()
         }
 
         let config = configStore.load()
