@@ -8,7 +8,7 @@ final class WeatherService {
     private let cacheURL: URL
     private let client: HTTPClient
     private let now: () -> Date
-    private let cacheLock = NSLock()
+    private let cacheQueue = DispatchQueue(label: "dev.danbao.glancepane.weather-cache", qos: .utility)
     private var cacheGeneration = 0
     private var cachedToken: CachedQWeatherToken?
 
@@ -44,7 +44,8 @@ final class WeatherService {
     }
 
     func fetch(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
-        guard let generation = beginRequest() else {
+        let generation = await requestGeneration()
+        guard !Task.isCancelled else {
             return .failure(.network("Weather refresh cancelled"))
         }
         guard config.weather.location.isConfigured else {
@@ -60,14 +61,22 @@ final class WeatherService {
     }
 
     func cancelRequests() {
-        cacheLock.withLock { cacheGeneration &+= 1 }
+        cacheQueue.async { self.cacheGeneration &+= 1 }
     }
 
-    private func beginRequest() -> Int? {
-        cacheLock.withLock {
-            guard !Task.isCancelled else { return nil }
-            cacheGeneration &+= 1
-            return cacheGeneration
+    private func requestGeneration() async -> Int {
+        await withCheckedContinuation { continuation in
+            cacheQueue.async { continuation.resume(returning: self.cacheGeneration) }
+        }
+    }
+
+    private func effectiveJWT(config: AppConfig) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            cacheQueue.async {
+                continuation.resume(with: Result {
+                    try Self.effectiveJWT(config: config, cachedToken: &self.cachedToken)
+                })
+            }
         }
     }
 
@@ -79,9 +88,7 @@ final class WeatherService {
 
         let jwt: String
         do {
-            jwt = try cacheLock.withLock {
-                try Self.effectiveJWT(config: config, cachedToken: &cachedToken)
-            }
+            jwt = try await effectiveJWT(config: config)
         } catch WeatherServiceError.setupRequired(let message) {
             return .failure(.setupRequired(message))
         } catch {
@@ -108,7 +115,7 @@ final class WeatherService {
                 cached: compatibleCache
             )
             try Task.checkCancellation()
-            writeCache(snapshot, generation: generation)
+            await writeCache(snapshot, generation: generation)
             return .success(snapshot)
         } catch {
             if var cached = compatibleCache {
@@ -220,7 +227,7 @@ final class WeatherService {
                 cached: compatibleCache
             )
             try Task.checkCancellation()
-            writeCache(snapshot, generation: generation)
+            await writeCache(snapshot, generation: generation)
             return .success(snapshot)
         } catch {
             if var cached = compatibleCache {
@@ -821,11 +828,18 @@ final class WeatherService {
         return try JSONDecoder().decode(type, from: data)
     }
 
-    private func writeCache(_ snapshot: WeatherSnapshot, generation: Int) {
-        // Serialize invalidation with the write, so cancellation cannot race a
-        // checked-but-not-yet-written response into the persistent cache.
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
+    private func writeCache(_ snapshot: WeatherSnapshot, generation: Int) async {
+        // FIFO invalidation and writes keep obsolete responses out of the cache
+        // without making the main actor wait for file I/O or JWT signing.
+        await withCheckedContinuation { continuation in
+            cacheQueue.async {
+                self.writeCacheOnQueue(snapshot, generation: generation)
+                continuation.resume()
+            }
+        }
+    }
+
+    private func writeCacheOnQueue(_ snapshot: WeatherSnapshot, generation: Int) {
         guard generation == cacheGeneration else { return }
         do {
             let encoder = JSONEncoder()
