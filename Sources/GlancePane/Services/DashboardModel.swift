@@ -41,7 +41,6 @@ final class DashboardModel: ObservableObject {
     private var lastWeatherRefresh: Date?
     private var lastNetworkProbe: Date?
     private var isFetchingStocks = false
-    private var isFetchingWeather = false
     private var isProbingNetwork = false
     private var latestNetworkLatency: Double?
     private var lastActivityDate = Date()
@@ -126,19 +125,16 @@ final class DashboardModel: ObservableObject {
         timer?.invalidate()
         timer = nil
         stockTask?.cancel()
-        weatherTask?.cancel()
+        cancelWeatherRefresh()
         networkProbeTask?.cancel()
         codexTask?.cancel()
         stockTask = nil
-        weatherTask = nil
         networkProbeTask = nil
         codexTask = nil
         stockRequestGeneration &+= 1
-        weatherRequestGeneration &+= 1
         networkProbeGeneration &+= 1
         codexRequestGeneration &+= 1
         isFetchingStocks = false
-        isFetchingWeather = false
         isProbingNetwork = false
         if let codexUsageService {
             Task { await codexUsageService.stop() }
@@ -393,13 +389,12 @@ final class DashboardModel: ObservableObject {
 
     private func refreshWeather(force: Bool) {
         guard visiblePages.contains(.weather) else {
+            cancelWeatherRefresh()
             weatherStatus = .hidden
             return
         }
 
-        if isFetchingWeather {
-            return
-        }
+        guard weatherTask == nil else { return }
 
         if !force,
            let lastWeatherRefresh,
@@ -407,7 +402,6 @@ final class DashboardModel: ObservableObject {
             return
         }
 
-        isFetchingWeather = true
         weatherStatus = weatherSnapshot.current == nil && weatherSnapshot.hourly.isEmpty && weatherSnapshot.minutely.isEmpty
             ? .loading
             : .refreshing
@@ -417,6 +411,12 @@ final class DashboardModel: ObservableObject {
         let requestGeneration = weatherRequestGeneration
         weatherTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                // An obsolete request must not clear the replacement task.
+                if requestGeneration == weatherRequestGeneration {
+                    weatherTask = nil
+                }
+            }
             let result = await weatherService.fetch(config: requestConfig)
             guard !Task.isCancelled,
                   requestGeneration == weatherRequestGeneration,
@@ -424,8 +424,6 @@ final class DashboardModel: ObservableObject {
                   visiblePages.contains(.weather) else { return }
 
             lastWeatherRefresh = Date()
-            isFetchingWeather = false
-            weatherTask = nil
 
             switch result {
             case .success(let snapshot):
@@ -446,6 +444,13 @@ final class DashboardModel: ObservableObject {
                 weatherStatus = .offline
             }
         }
+    }
+
+    private func cancelWeatherRefresh() {
+        weatherRequestGeneration &+= 1
+        weatherTask?.cancel()
+        weatherService.cancelRequests()
+        weatherTask = nil
     }
 
     private func startCodexUsageIfNeeded() {

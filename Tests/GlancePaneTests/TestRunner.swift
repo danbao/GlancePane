@@ -115,6 +115,15 @@ struct GlancePaneTestRunner {
             TestCase("weather fetch keeps partial cached data") {
                 try await testWeatherFetchKeepsPartialCachedData()
             },
+            TestCase("weather resumes after hiding an in-flight request") {
+                try await testWeatherResumesAfterHidingRequest()
+            },
+            TestCase("obsolete weather completion cannot replace a newer request") {
+                try await testObsoleteWeatherCompletion()
+            },
+            TestCase("weather restart protects live and cached data from late completion") {
+                try await testWeatherRestartProtectsCache()
+            },
             TestCase("weather icons map common conditions") {
                 try testWeatherIconsMapCommonConditions()
             },
@@ -276,8 +285,14 @@ struct GlancePaneTestRunner {
             }
         ]
 
+        let filter = ProcessInfo.processInfo.environment["GLANCEPANE_TEST_FILTER"] ?? ""
+        let selectedTests = tests.filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }
+        guard !selectedTests.isEmpty else {
+            print("No tests match the requested filter")
+            exit(1)
+        }
         var failures = 0
-        for test in tests {
+        for test in selectedTests {
             do {
                 try await test.run()
                 print("PASS \(test.name)")
@@ -292,7 +307,7 @@ struct GlancePaneTestRunner {
             exit(1)
         }
 
-        print("\nAll \(tests.count) GlancePane tests passed")
+        print("\nAll \(selectedTests.count) GlancePane tests passed")
     }
 }
 
@@ -2876,6 +2891,116 @@ private func testConfigReloadIgnoresStaleStockResponse() async throws {
     try await Task.sleep(nanoseconds: 550_000_000)
     try expectEqual(model.quotes.map(\.symbol), ["NEW"])
     try expectEqual(model.stockStatus, .live)
+}
+
+@MainActor
+private func testWeatherResumesAfterHidingRequest() async throws {
+    let store = ConfigStore(configDirectoryURL: try makeTestDirectory("weather-resume"))
+    let client = ControlledWeatherHTTPClient()
+    let model = makeWeatherTestModel(store: store, client: client)
+    defer { model.stop() }
+    model.setPage(.weather, enabled: true)
+    try await eventually { await client.forecastCount == 1 }
+    model.setPage(.weather, enabled: false)
+    await client.completeForecast(1, temperature: 10)
+    // Let the already-started request finish while the page is hidden.
+    try await Task.sleep(nanoseconds: 50_000_000)
+    try expectEqual(model.weatherStatus, .hidden)
+    model.setPage(.weather, enabled: true)
+    try await eventually { await client.forecastCount == 2 }
+    await client.completeForecast(2, temperature: 20)
+    try await eventually { model.weatherStatus == .live }
+    try expectEqual(model.weatherSnapshot.current?.temperatureCelsius, 20)
+}
+
+@MainActor
+private func testObsoleteWeatherCompletion() async throws {
+    let store = ConfigStore(configDirectoryURL: try makeTestDirectory("weather-obsolete"))
+    let client = ControlledWeatherHTTPClient()
+    let model = makeWeatherTestModel(store: store, client: client)
+    defer { model.stop() }
+    model.setPage(.weather, enabled: true)
+    try await eventually { await client.forecastCount == 1 }
+    model.setPage(.weather, enabled: false)
+    model.setPage(.weather, enabled: true)
+    try await eventually { await client.forecastCount == 2 }
+    await client.completeForecast(1, temperature: 10)
+    try await Task.sleep(nanoseconds: 50_000_000)
+    model.showPage(.weather)
+    try expectEqual(model.weatherSnapshot.current, nil)
+    let count = await client.forecastCount
+    try expectEqual(count, 2)
+    await client.completeForecast(2, temperature: 20)
+    try await eventually { model.weatherStatus == .live }
+    try expectEqual(model.weatherSnapshot.current?.temperatureCelsius, 20)
+}
+
+@MainActor
+private func makeWeatherTestModel(store: ConfigStore, client: HTTPClient) -> DashboardModel {
+    var config = AppConfig.default
+    config.pages.enabled = [.clock, .weather]
+    config.market.enabled = false
+    config.agents.codex.enabled = false
+    config.system.enabledGroups = []
+    config.system.processes.enabled = false
+    config.weather.location = WeatherLocationConfig(name: "", longitude: 13.4, latitude: 52.5)
+    return DashboardModel(
+        config: config, configStore: store, displayManager: DisplayManager(),
+        weatherService: WeatherService(cacheURL: store.weatherCacheURL, client: client)
+    )
+}
+
+@MainActor
+private func testWeatherRestartProtectsCache() async throws {
+    let store = ConfigStore(configDirectoryURL: try makeTestDirectory("weather-restart"))
+    let client = ControlledWeatherHTTPClient()
+    let model = makeWeatherTestModel(store: store, client: client)
+    defer { model.stop() }
+    model.start()
+    try await eventually { await client.forecastCount == 1 }
+    model.stop()
+    model.start()
+    try await eventually { await client.forecastCount == 2 }
+    await client.completeForecast(2, temperature: 20)
+    try await eventually { model.weatherStatus == .live }
+    await client.completeForecast(1, temperature: 10)
+    try await Task.sleep(nanoseconds: 50_000_000)
+    try expectEqual(model.weatherSnapshot.current?.temperatureCelsius, 20)
+    let cached = WeatherService(cacheURL: store.weatherCacheURL).loadCached()
+    try expectEqual(cached?.current?.temperatureCelsius, 20)
+}
+
+@MainActor
+private func eventually(_ condition: @MainActor () async -> Bool) async throws {
+    let deadline = Date().addingTimeInterval(2)
+    while !(await condition()) {
+        try expect(Date() < deadline, "timed out waiting for expected behavior")
+        try await Task.sleep(nanoseconds: 5_000_000)
+    }
+}
+
+private actor ControlledWeatherHTTPClient: HTTPClient {
+    private(set) var forecastCount = 0
+    private var pending: [Int: (URLRequest, CheckedContinuation<(Data, URLResponse), Error>)] = [:]
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        if request.url?.path == "/v1/forecast" {
+            forecastCount += 1
+            let number = forecastCount
+            // Intentionally ignore cancellation to exercise obsolete completions.
+            return try await withCheckedThrowingContinuation { pending[number] = (request, $0) }
+        }
+        return try httpResponse(for: request, json: "{\"current\":{\"us_aqi\":42}}")
+    }
+
+    func completeForecast(_ number: Int, temperature: Int) {
+        guard let (request, continuation) = pending.removeValue(forKey: number) else { return }
+        continuation.resume(with: Result {
+            try httpResponse(for: request, json: """
+            {"timezone":"UTC","current":{"time":"2026-07-25T12:00","temperature_2m":\(temperature),"weather_code":0}}
+            """)
+        })
+    }
 }
 
 @MainActor

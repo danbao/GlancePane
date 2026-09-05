@@ -8,7 +8,7 @@ final class WeatherService {
     private let cacheURL: URL
     private let client: HTTPClient
     private let now: () -> Date
-    private var cachedToken: CachedQWeatherToken?
+    private let persistence: Persistence
 
     init(
         cacheURL: URL,
@@ -16,6 +16,7 @@ final class WeatherService {
         now: @escaping () -> Date = Date.init
     ) {
         self.cacheURL = cacheURL
+        persistence = Persistence(cacheURL: cacheURL)
         self.now = now
 
         if let client {
@@ -42,19 +43,27 @@ final class WeatherService {
     }
 
     func fetch(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
+        let generation = await persistence.requestGeneration()
+        guard !Task.isCancelled else {
+            return .failure(.network("Weather refresh cancelled"))
+        }
         guard config.weather.location.isConfigured else {
             return .failure(.setupRequired("Set a weather location in GlancePane Settings"))
         }
 
         switch config.weather.provider {
         case .qweather:
-            return await fetchQWeather(config: config)
+            return await fetchQWeather(config: config, generation: generation)
         case .openMeteo:
-            return await fetchOpenMeteo(config: config)
+            return await fetchOpenMeteo(config: config, generation: generation)
         }
     }
 
-    private func fetchQWeather(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
+    func cancelRequests() {
+        persistence.cancelRequests()
+    }
+
+    private func fetchQWeather(config: AppConfig, generation: Int) async -> Result<WeatherSnapshot, WeatherFetchError> {
         let apiHost = config.weather.qweather.apiHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !apiHost.isEmpty else {
             return .failure(.setupRequired("Set weather.qweather.apiHost in ~/.glancepane/config.json"))
@@ -62,7 +71,7 @@ final class WeatherService {
 
         let jwt: String
         do {
-            jwt = try Self.effectiveJWT(config: config, cachedToken: &cachedToken)
+            jwt = try await persistence.effectiveJWT(config: config)
         } catch WeatherServiceError.setupRequired(let message) {
             return .failure(.setupRequired(message))
         } catch {
@@ -88,7 +97,8 @@ final class WeatherService {
                 location: location,
                 cached: compatibleCache
             )
-            writeCache(snapshot)
+            try Task.checkCancellation()
+            await persistence.writeCache(snapshot, generation: generation)
             return .success(snapshot)
         } catch {
             if var cached = compatibleCache {
@@ -187,7 +197,7 @@ final class WeatherService {
         )
     }
 
-    private func fetchOpenMeteo(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
+    private func fetchOpenMeteo(config: AppConfig, generation: Int) async -> Result<WeatherSnapshot, WeatherFetchError> {
         let cached = loadCached()
         guard let location = await resolveOpenMeteoLocation(config: config, cached: cached) else {
             return .failure(.setupRequired("Set a valid weather name or coordinates in GlancePane Settings"))
@@ -199,7 +209,8 @@ final class WeatherService {
                 location: location,
                 cached: compatibleCache
             )
-            writeCache(snapshot)
+            try Task.checkCancellation()
+            await persistence.writeCache(snapshot, generation: generation)
             return .success(snapshot)
         } catch {
             if var cached = compatibleCache {
@@ -728,7 +739,9 @@ final class WeatherService {
         var request = URLRequest(url: url)
         request.setValue(Self.authorizationHeader(jwt: jwt), forHTTPHeaderField: "Authorization")
 
+        try Task.checkCancellation()
         let (data, response) = try await client.data(for: request)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -759,7 +772,9 @@ final class WeatherService {
         var request = URLRequest(url: url)
         request.setValue(Self.authorizationHeader(jwt: jwt), forHTTPHeaderField: "Authorization")
 
+        try Task.checkCancellation()
         let (data, response) = try await client.data(for: request)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -786,7 +801,9 @@ final class WeatherService {
         }
 
         let request = URLRequest(url: url)
+        try Task.checkCancellation()
         let (data, response) = try await client.data(for: request)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -794,15 +811,52 @@ final class WeatherService {
         return try JSONDecoder().decode(type, from: data)
     }
 
-    private func writeCache(_ snapshot: WeatherSnapshot) {
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try SecureFileStore.write(encoder.encode(snapshot), to: cacheURL)
-        } catch {
-            Self.logger.error(
-                "Failed to write weather cache: \(error.localizedDescription, privacy: .private)"
-            )
+    // All mutable state is confined to queue. No HTTP client or caller closure
+    // crosses this Sendable boundary; cancellation never waits for disk I/O.
+    private final class Persistence: @unchecked Sendable {
+        private let queue = DispatchQueue(label: "dev.danbao.glancepane.weather-cache", qos: .utility)
+        private let cacheURL: URL
+        private var generation = 0
+        private var cachedToken: CachedQWeatherToken?
+
+        init(cacheURL: URL) { self.cacheURL = cacheURL }
+
+        func cancelRequests() {
+            queue.async { self.generation &+= 1 }
+        }
+
+        func requestGeneration() async -> Int {
+            await withCheckedContinuation { continuation in
+                queue.async { continuation.resume(returning: self.generation) }
+            }
+        }
+
+        func effectiveJWT(config: AppConfig) async throws -> String {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.async {
+                    continuation.resume(with: Result {
+                        try WeatherService.effectiveJWT(config: config, cachedToken: &self.cachedToken)
+                    })
+                }
+            }
+        }
+
+        func writeCache(_ snapshot: WeatherSnapshot, generation: Int) async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                queue.async {
+                    defer { continuation.resume() }
+                    guard generation == self.generation else { return }
+                    do {
+                        let encoder = JSONEncoder()
+                        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                        try SecureFileStore.write(encoder.encode(snapshot), to: self.cacheURL)
+                    } catch {
+                        WeatherService.logger.error(
+                            "Failed to write weather cache: \(error.localizedDescription, privacy: .private)"
+                        )
+                    }
+                }
+            }
         }
     }
 
