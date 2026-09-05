@@ -8,9 +8,7 @@ final class WeatherService {
     private let cacheURL: URL
     private let client: HTTPClient
     private let now: () -> Date
-    private let cacheQueue = DispatchQueue(label: "dev.danbao.glancepane.weather-cache", qos: .utility)
-    private var cacheGeneration = 0
-    private var cachedToken: CachedQWeatherToken?
+    private let persistence: Persistence
 
     init(
         cacheURL: URL,
@@ -18,6 +16,7 @@ final class WeatherService {
         now: @escaping () -> Date = Date.init
     ) {
         self.cacheURL = cacheURL
+        persistence = Persistence(cacheURL: cacheURL)
         self.now = now
 
         if let client {
@@ -44,7 +43,7 @@ final class WeatherService {
     }
 
     func fetch(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
-        let generation = await requestGeneration()
+        let generation = await persistence.requestGeneration()
         guard !Task.isCancelled else {
             return .failure(.network("Weather refresh cancelled"))
         }
@@ -61,23 +60,7 @@ final class WeatherService {
     }
 
     func cancelRequests() {
-        cacheQueue.async { self.cacheGeneration &+= 1 }
-    }
-
-    private func requestGeneration() async -> Int {
-        await withCheckedContinuation { continuation in
-            cacheQueue.async { continuation.resume(returning: self.cacheGeneration) }
-        }
-    }
-
-    private func effectiveJWT(config: AppConfig) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            cacheQueue.async {
-                continuation.resume(with: Result {
-                    try Self.effectiveJWT(config: config, cachedToken: &self.cachedToken)
-                })
-            }
-        }
+        persistence.cancelRequests()
     }
 
     private func fetchQWeather(config: AppConfig, generation: Int) async -> Result<WeatherSnapshot, WeatherFetchError> {
@@ -88,7 +71,7 @@ final class WeatherService {
 
         let jwt: String
         do {
-            jwt = try await effectiveJWT(config: config)
+            jwt = try await persistence.effectiveJWT(config: config)
         } catch WeatherServiceError.setupRequired(let message) {
             return .failure(.setupRequired(message))
         } catch {
@@ -115,7 +98,7 @@ final class WeatherService {
                 cached: compatibleCache
             )
             try Task.checkCancellation()
-            await writeCache(snapshot, generation: generation)
+            await persistence.writeCache(snapshot, generation: generation)
             return .success(snapshot)
         } catch {
             if var cached = compatibleCache {
@@ -227,7 +210,7 @@ final class WeatherService {
                 cached: compatibleCache
             )
             try Task.checkCancellation()
-            await writeCache(snapshot, generation: generation)
+            await persistence.writeCache(snapshot, generation: generation)
             return .success(snapshot)
         } catch {
             if var cached = compatibleCache {
@@ -828,27 +811,52 @@ final class WeatherService {
         return try JSONDecoder().decode(type, from: data)
     }
 
-    private func writeCache(_ snapshot: WeatherSnapshot, generation: Int) async {
-        // FIFO invalidation and writes keep obsolete responses out of the cache
-        // without making the main actor wait for file I/O or JWT signing.
-        await withCheckedContinuation { continuation in
-            cacheQueue.async {
-                self.writeCacheOnQueue(snapshot, generation: generation)
-                continuation.resume()
+    // All mutable state is confined to queue. No HTTP client or caller closure
+    // crosses this Sendable boundary; cancellation never waits for disk I/O.
+    private final class Persistence: @unchecked Sendable {
+        private let queue = DispatchQueue(label: "dev.danbao.glancepane.weather-cache", qos: .utility)
+        private let cacheURL: URL
+        private var generation = 0
+        private var cachedToken: CachedQWeatherToken?
+
+        init(cacheURL: URL) { self.cacheURL = cacheURL }
+
+        func cancelRequests() {
+            queue.async { self.generation &+= 1 }
+        }
+
+        func requestGeneration() async -> Int {
+            await withCheckedContinuation { continuation in
+                queue.async { continuation.resume(returning: self.generation) }
             }
         }
-    }
 
-    private func writeCacheOnQueue(_ snapshot: WeatherSnapshot, generation: Int) {
-        guard generation == cacheGeneration else { return }
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try SecureFileStore.write(encoder.encode(snapshot), to: cacheURL)
-        } catch {
-            Self.logger.error(
-                "Failed to write weather cache: \(error.localizedDescription, privacy: .private)"
-            )
+        func effectiveJWT(config: AppConfig) async throws -> String {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.async {
+                    continuation.resume(with: Result {
+                        try WeatherService.effectiveJWT(config: config, cachedToken: &self.cachedToken)
+                    })
+                }
+            }
+        }
+
+        func writeCache(_ snapshot: WeatherSnapshot, generation: Int) async {
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    defer { continuation.resume() }
+                    guard generation == self.generation else { return }
+                    do {
+                        let encoder = JSONEncoder()
+                        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                        try SecureFileStore.write(encoder.encode(snapshot), to: self.cacheURL)
+                    } catch {
+                        WeatherService.logger.error(
+                            "Failed to write weather cache: \(error.localizedDescription, privacy: .private)"
+                        )
+                    }
+                }
+            }
         }
     }
 
