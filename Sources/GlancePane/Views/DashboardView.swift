@@ -1,81 +1,121 @@
 import SwiftUI
 
+struct DashboardPresentationState {
+    var config: AppConfig
+    var page: DashboardPage
+    var snapshot: SystemSnapshot = .empty
+    var history: SystemHistory = .empty
+    var quotes: [StockQuote] = []
+    var weatherSnapshot: WeatherSnapshot = .empty
+    var codexUsage: CodexUsageSnapshot = .empty
+    var currentDate = Date()
+    var stockStatus: FeedStatus = .loading
+    var weatherStatus: FeedStatus = .setup
+    var contentOffset: CGSize = .zero
+    var dimOpacity = 0.0
+    var isResting = false
+}
+
 struct DashboardView: View {
     @ObservedObject var model: DashboardModel
 
     var body: some View {
+        DashboardPresentationView(
+            state: DashboardPresentationState(
+                config: model.config,
+                page: model.page,
+                snapshot: model.snapshot,
+                history: model.history,
+                quotes: model.quotes,
+                weatherSnapshot: model.weatherSnapshot,
+                codexUsage: model.codexUsage,
+                currentDate: model.currentDate,
+                stockStatus: model.stockStatus,
+                weatherStatus: model.weatherStatus,
+                contentOffset: model.contentOffset,
+                dimOpacity: model.dimOpacity,
+                isResting: model.isResting
+            )
+        )
+    }
+}
+
+struct DashboardPresentationView: View {
+    let state: DashboardPresentationState
+
+    var body: some View {
         GeometryReader { proxy in
-            let theme = ScreenTheme(themeName: model.config.appearance.theme)
+            let theme = ScreenTheme(themeName: state.config.appearance.theme)
             let widthScale = proxy.size.width / DashboardLayout.referenceSize.width
             let heightScale = proxy.size.height / DashboardLayout.referenceSize.height
             let scale = max(0.55, min(widthScale, heightScale))
             ZStack {
-                if model.page == .clock {
+                if state.page == .clock {
                     Color.black.ignoresSafeArea()
                 } else {
                     theme.background.ignoresSafeArea()
                 }
 
                 Group {
-                    switch model.page {
+                    switch state.page {
                     case .clock:
-                        ClockPageView(date: model.currentDate, theme: theme, scale: scale)
+                        ClockPageView(date: state.currentDate, theme: theme, scale: scale)
                     case .system:
                         SystemPageView(
-                            snapshot: model.snapshot,
-                            history: model.history,
-                            units: model.config.appearance.units,
+                            snapshot: state.snapshot,
+                            history: state.history,
+                            units: state.config.appearance.units,
                             theme: theme,
                             scale: scale
                         )
                     case .performance:
                         PerformancePageView(
-                            snapshot: model.snapshot,
-                            history: model.history,
-                            units: model.config.appearance.units,
+                            snapshot: state.snapshot,
+                            history: state.history,
+                            units: state.config.appearance.units,
                             theme: theme,
                             scale: scale
                         )
                     case .agents:
                         AgentsPageView(
-                            snapshot: model.codexUsage,
+                            snapshot: state.codexUsage,
                             theme: theme,
                             scale: scale
                         )
                     case .market:
                         MarketPageView(
-                            quotes: model.quotes,
-                            configuredSymbolCount: model.config.market.symbols.count,
-                            status: model.stockStatus,
+                            quotes: state.quotes,
+                            configuredSymbolCount: state.config.market.symbols.count,
+                            status: state.stockStatus,
                             theme: theme,
                             scale: scale
                         )
                     case .weather:
                         WeatherPageView(
-                            snapshot: model.weatherSnapshot,
-                            status: model.weatherStatus,
-                            config: model.config,
+                            snapshot: state.weatherSnapshot,
+                            status: state.weatherStatus,
+                            config: state.config,
                             theme: theme,
                             scale: scale
                         )
                     }
                 }
-                .id(model.page)
+                .id(state.page)
                 .transition(.opacity)
                 .frame(maxHeight: .infinity, alignment: .top)
-                .padding(model.page == .clock ? 0 : DashboardLayout.pagePadding * scale)
-                .offset(x: model.contentOffset.width, y: model.contentOffset.height)
-                .animation(.easeInOut(duration: 0.8), value: model.contentOffset)
+                .padding(state.page == .clock ? 0 : DashboardLayout.pagePadding * scale)
+                .offset(x: state.contentOffset.width, y: state.contentOffset.height)
+                .animation(.easeInOut(duration: 0.8), value: state.contentOffset)
 
-                if model.dimOpacity > 0 {
+                if state.dimOpacity > 0 {
                     Color.black
-                        .opacity(model.dimOpacity)
+                        .opacity(state.dimOpacity)
                         .ignoresSafeArea()
                         .allowsHitTesting(false)
                         .transition(.opacity)
                 }
 
-                if model.isResting {
+                if state.isResting {
                     Color.black
                         .ignoresSafeArea()
                         .allowsHitTesting(false)
@@ -84,9 +124,9 @@ struct DashboardView: View {
                 }
             }
             .allowsHitTesting(false)
-            .animation(.easeInOut(duration: 0.18), value: model.page)
-            .animation(.easeInOut(duration: 0.25), value: model.dimOpacity)
-            .animation(.easeInOut(duration: 0.3), value: model.isResting)
+            .animation(.easeInOut(duration: 0.18), value: state.page)
+            .animation(.easeInOut(duration: 0.25), value: state.dimOpacity)
+            .animation(.easeInOut(duration: 0.3), value: state.isResting)
         }
     }
 }
