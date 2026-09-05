@@ -842,7 +842,7 @@ final class WeatherService {
         }
 
         func writeCache(_ snapshot: WeatherSnapshot, generation: Int) async {
-            await withCheckedContinuation { continuation in
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 queue.async {
                     defer { continuation.resume() }
                     guard generation == self.generation else { return }
