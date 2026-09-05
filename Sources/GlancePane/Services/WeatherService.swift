@@ -129,6 +129,7 @@ final class WeatherService {
         var attributionURL = cached?.attributionURL
         var errors: [Error] = []
         var successfulRequests = 0
+        var receivedNoMinuteData = false
 
         do {
             let result = try await fetchNow(apiHost: apiHost, jwt: jwt, location: location.weatherQuery)
@@ -167,6 +168,7 @@ final class WeatherService {
             minutely = []
             summary = "No minute rain data"
             successfulRequests += 1
+            receivedNoMinuteData = true
         } catch {
             errors.append(error)
         }
@@ -186,7 +188,7 @@ final class WeatherService {
         guard successfulRequests > 0 else {
             throw errors.first ?? WeatherServiceError.emptyResponse
         }
-        guard current != nil || !hourly.isEmpty || !minutely.isEmpty || !daily.isEmpty || airQuality != nil else {
+        guard receivedNoMinuteData || current != nil || !hourly.isEmpty || !minutely.isEmpty || !daily.isEmpty || airQuality != nil else {
             throw errors.first ?? WeatherServiceError.emptyResponse
         }
 

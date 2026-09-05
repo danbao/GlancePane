@@ -118,6 +118,9 @@ struct GlancePaneTestRunner {
             TestCase("weather complete failure preserves cache freshness") {
                 try await testWeatherCompleteFailurePreservesFreshness()
             },
+            TestCase("weather valid no-data clears a precipitation-only cache") {
+                try await testWeatherNoDataClearsPrecipitationCache()
+            },
             TestCase("weather config changes reject unrelated cache before and after failure") {
                 try await testWeatherConfigChangesRejectCache()
             },
@@ -2955,6 +2958,36 @@ private func makeCachedWeather(provider: WeatherProvider = .openMeteo) -> Weathe
         attributionURL: nil, updatedAt: Date(timeIntervalSince1970: 1_000),
         isCached: false, errorMessage: nil
     )
+}
+
+private func testWeatherNoDataClearsPrecipitationCache() async throws {
+    setenv("GLANCEPANE_QWEATHER_JWT", "test-token", 1)
+    defer { unsetenv("GLANCEPANE_QWEATHER_JWT") }
+    let store = ConfigStore(configDirectoryURL: try makeTestDirectory("weather-no-data"))
+    let base = makeWeatherSnapshot()
+    let original = WeatherSnapshot(
+        provider: .qweather, locationName: "Configured Location", locationID: nil,
+        longitude: 13.4, latitude: 52.5, timeZoneIdentifier: nil,
+        current: nil, hourly: [], daily: [], minutely: base.minutely,
+        precipitationSummary: "Old rain", airQuality: nil, attributionURL: nil,
+        updatedAt: Date(timeIntervalSince1970: 1_000), isCached: false, errorMessage: nil
+    )
+    try expect(!original.minutely.isEmpty, "fixture must contain old precipitation")
+    try writeJSON(original, to: store.weatherCacheURL)
+    var config = AppConfig.default
+    config.weather = matchingWeatherConfig(original)
+    config.weather.qweather.apiHost = "example.test"
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: MockHTTPClient { request in
+        if request.url?.path == "/v7/minutely/5m" {
+            return try httpResponse(for: request, json: "{\"code\":\"204\"}")
+        }
+        throw URLError(.timedOut)
+    })
+    guard case .success(let snapshot) = await service.fetch(config: config) else {
+        throw TestFailure(message: "valid no-data must clear old rain instead of restoring it", file: #fileID, line: #line)
+    }
+    try expect(snapshot.minutely.isEmpty, "old precipitation must be cleared")
+    try expectEqual(service.loadCached(config: config.weather)?.minutely, [])
 }
 
 private func matchingWeatherConfig(_ snapshot: WeatherSnapshot) -> WeatherConfig {
