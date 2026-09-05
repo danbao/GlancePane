@@ -8,6 +8,8 @@ final class WeatherService {
     private let cacheURL: URL
     private let client: HTTPClient
     private let now: () -> Date
+    private let cacheLock = NSLock()
+    private var cacheGeneration = 0
     private var cachedToken: CachedQWeatherToken?
 
     init(
@@ -42,19 +44,34 @@ final class WeatherService {
     }
 
     func fetch(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
+        guard let generation = beginRequest() else {
+            return .failure(.network("Weather refresh cancelled"))
+        }
         guard config.weather.location.isConfigured else {
             return .failure(.setupRequired("Set a weather location in GlancePane Settings"))
         }
 
         switch config.weather.provider {
         case .qweather:
-            return await fetchQWeather(config: config)
+            return await fetchQWeather(config: config, generation: generation)
         case .openMeteo:
-            return await fetchOpenMeteo(config: config)
+            return await fetchOpenMeteo(config: config, generation: generation)
         }
     }
 
-    private func fetchQWeather(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
+    func cancelRequests() {
+        cacheLock.withLock { cacheGeneration &+= 1 }
+    }
+
+    private func beginRequest() -> Int? {
+        cacheLock.withLock {
+            guard !Task.isCancelled else { return nil }
+            cacheGeneration &+= 1
+            return cacheGeneration
+        }
+    }
+
+    private func fetchQWeather(config: AppConfig, generation: Int) async -> Result<WeatherSnapshot, WeatherFetchError> {
         let apiHost = config.weather.qweather.apiHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !apiHost.isEmpty else {
             return .failure(.setupRequired("Set weather.qweather.apiHost in ~/.glancepane/config.json"))
@@ -62,7 +79,9 @@ final class WeatherService {
 
         let jwt: String
         do {
-            jwt = try Self.effectiveJWT(config: config, cachedToken: &cachedToken)
+            jwt = try cacheLock.withLock {
+                try Self.effectiveJWT(config: config, cachedToken: &cachedToken)
+            }
         } catch WeatherServiceError.setupRequired(let message) {
             return .failure(.setupRequired(message))
         } catch {
@@ -89,7 +108,7 @@ final class WeatherService {
                 cached: compatibleCache
             )
             try Task.checkCancellation()
-            writeCache(snapshot)
+            writeCache(snapshot, generation: generation)
             return .success(snapshot)
         } catch {
             if var cached = compatibleCache {
@@ -188,7 +207,7 @@ final class WeatherService {
         )
     }
 
-    private func fetchOpenMeteo(config: AppConfig) async -> Result<WeatherSnapshot, WeatherFetchError> {
+    private func fetchOpenMeteo(config: AppConfig, generation: Int) async -> Result<WeatherSnapshot, WeatherFetchError> {
         let cached = loadCached()
         guard let location = await resolveOpenMeteoLocation(config: config, cached: cached) else {
             return .failure(.setupRequired("Set a valid weather name or coordinates in GlancePane Settings"))
@@ -201,7 +220,7 @@ final class WeatherService {
                 cached: compatibleCache
             )
             try Task.checkCancellation()
-            writeCache(snapshot)
+            writeCache(snapshot, generation: generation)
             return .success(snapshot)
         } catch {
             if var cached = compatibleCache {
@@ -802,7 +821,12 @@ final class WeatherService {
         return try JSONDecoder().decode(type, from: data)
     }
 
-    private func writeCache(_ snapshot: WeatherSnapshot) {
+    private func writeCache(_ snapshot: WeatherSnapshot, generation: Int) {
+        // Serialize invalidation with the write, so cancellation cannot race a
+        // checked-but-not-yet-written response into the persistent cache.
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard generation == cacheGeneration else { return }
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

@@ -449,6 +449,7 @@ final class DashboardModel: ObservableObject {
     private func cancelWeatherRefresh() {
         weatherRequestGeneration &+= 1
         weatherTask?.cancel()
+        weatherService.cancelRequests()
         weatherTask = nil
     }
 

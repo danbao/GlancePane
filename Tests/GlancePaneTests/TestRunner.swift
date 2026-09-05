@@ -121,6 +121,9 @@ struct GlancePaneTestRunner {
             TestCase("obsolete weather completion cannot replace a newer request") {
                 try await testObsoleteWeatherCompletion()
             },
+            TestCase("weather restart protects live and cached data from late completion") {
+                try await testWeatherRestartProtectsCache()
+            },
             TestCase("weather icons map common conditions") {
                 try testWeatherIconsMapCommonConditions()
             },
@@ -2945,6 +2948,26 @@ private func makeWeatherTestModel(store: ConfigStore, client: HTTPClient) -> Das
         config: config, configStore: store, displayManager: DisplayManager(),
         weatherService: WeatherService(cacheURL: store.weatherCacheURL, client: client)
     )
+}
+
+@MainActor
+private func testWeatherRestartProtectsCache() async throws {
+    let store = ConfigStore(configDirectoryURL: try makeTestDirectory("weather-restart"))
+    let client = ControlledWeatherHTTPClient()
+    let model = makeWeatherTestModel(store: store, client: client)
+    defer { model.stop() }
+    model.start()
+    try await eventually { await client.forecastCount == 1 }
+    model.stop()
+    model.start()
+    try await eventually { await client.forecastCount == 2 }
+    await client.completeForecast(2, temperature: 20)
+    try await eventually { model.weatherStatus == .live }
+    await client.completeForecast(1, temperature: 10)
+    try await Task.sleep(nanoseconds: 50_000_000)
+    try expectEqual(model.weatherSnapshot.current?.temperatureCelsius, 20)
+    let cached = WeatherService(cacheURL: store.weatherCacheURL).loadCached()
+    try expectEqual(cached?.current?.temperatureCelsius, 20)
 }
 
 @MainActor
