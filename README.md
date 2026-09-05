@@ -147,6 +147,9 @@ sh scripts/export-readme-screenshots.sh
 
 ## Development
 
+The [reliability improvement plan](docs/reliability-plan.md) tracks focused fixes,
+their acceptance scenarios, and delivery order.
+
 Run the app detached from the terminal:
 
 ```bash

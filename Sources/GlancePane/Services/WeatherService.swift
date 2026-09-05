@@ -88,6 +88,7 @@ final class WeatherService {
                 location: location,
                 cached: compatibleCache
             )
+            try Task.checkCancellation()
             writeCache(snapshot)
             return .success(snapshot)
         } catch {
@@ -199,6 +200,7 @@ final class WeatherService {
                 location: location,
                 cached: compatibleCache
             )
+            try Task.checkCancellation()
             writeCache(snapshot)
             return .success(snapshot)
         } catch {
@@ -728,7 +730,9 @@ final class WeatherService {
         var request = URLRequest(url: url)
         request.setValue(Self.authorizationHeader(jwt: jwt), forHTTPHeaderField: "Authorization")
 
+        try Task.checkCancellation()
         let (data, response) = try await client.data(for: request)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -759,7 +763,9 @@ final class WeatherService {
         var request = URLRequest(url: url)
         request.setValue(Self.authorizationHeader(jwt: jwt), forHTTPHeaderField: "Authorization")
 
+        try Task.checkCancellation()
         let (data, response) = try await client.data(for: request)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -786,7 +792,9 @@ final class WeatherService {
         }
 
         let request = URLRequest(url: url)
+        try Task.checkCancellation()
         let (data, response) = try await client.data(for: request)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
