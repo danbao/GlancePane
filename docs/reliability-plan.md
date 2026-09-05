@@ -6,7 +6,7 @@ the public-tree audit, packaging, and secret scanning pass.
 | Order | Change | Acceptance scenarios | Status |
 | --- | --- | --- | --- |
 | 1 | Weather request lifecycle | Hide and re-enable during a request; late completions cannot replace or clear a newer request. | Implemented |
-| 2 | Weather cache identity and freshness | Reject another location/provider at every read; preserve timestamps on complete failure; retain partial fallback. | Planned |
+| 2 | Weather cache identity and freshness | Reject another location/provider at every read; preserve timestamps on complete failure; retain partial fallback. | Implemented |
 | 3 | Differential configuration updates | Appearance edits preserve feeds and protection timers; only changed feeds restart; only display changes reposition the window. | Planned |
 | 4 | Window recovery scheduling | A failed first display retry preserves later retries; lock/sleep suspends recovery; hidden windows ignore pointer input. | Planned |
 | 5 | Background system sampling | Slow collection does not block the main actor; collectors remain serial; stopped or superseded samples cannot publish. | Planned |

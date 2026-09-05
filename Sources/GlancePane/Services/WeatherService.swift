@@ -33,9 +33,12 @@ final class WeatherService {
         }
     }
 
-    func loadCached() -> WeatherSnapshot? {
+    func loadCached(config: WeatherConfig) -> WeatherSnapshot? {
         guard let data = try? Data(contentsOf: cacheURL),
-              var snapshot = try? JSONDecoder().decode(WeatherSnapshot.self, from: data)
+              var snapshot = try? JSONDecoder().decode(WeatherSnapshot.self, from: data),
+              snapshot.provider == config.provider,
+              snapshot.longitude.isFinite, snapshot.latitude.isFinite,
+              cachedLocationMatchesConfig(snapshot, config: config.location)
         else { return nil }
 
         snapshot.isCached = true
@@ -78,7 +81,7 @@ final class WeatherService {
             return .failure(.setupRequired(error.localizedDescription))
         }
 
-        let cached = loadCached()
+        let cached = loadCached(config: config.weather)
         guard let location = await resolveLocation(
             config: config,
             apiHost: apiHost,
@@ -125,11 +128,14 @@ final class WeatherService {
         var airQuality = cached?.airQuality
         var attributionURL = cached?.attributionURL
         var errors: [Error] = []
+        var successfulRequests = 0
+        var receivedNoMinuteData = false
 
         do {
             let result = try await fetchNow(apiHost: apiHost, jwt: jwt, location: location.weatherQuery)
             current = result.current
             attributionURL = result.attributionURL ?? attributionURL
+            successfulRequests += 1
         } catch {
             errors.append(error)
         }
@@ -138,6 +144,7 @@ final class WeatherService {
             let result = try await fetchHourly(apiHost: apiHost, jwt: jwt, location: location.weatherQuery)
             hourly = result.hourly
             attributionURL = result.attributionURL ?? attributionURL
+            successfulRequests += 1
         } catch {
             errors.append(error)
         }
@@ -146,6 +153,7 @@ final class WeatherService {
             let result = try await fetchDaily(apiHost: apiHost, jwt: jwt, location: location.weatherQuery)
             daily = result.daily
             attributionURL = result.attributionURL ?? attributionURL
+            successfulRequests += 1
         } catch {
             errors.append(error)
         }
@@ -155,9 +163,12 @@ final class WeatherService {
             minutely = result.minutely
             summary = result.summary
             attributionURL = result.attributionURL ?? attributionURL
+            successfulRequests += 1
         } catch WeatherServiceError.noData {
             minutely = []
             summary = "No minute rain data"
+            successfulRequests += 1
+            receivedNoMinuteData = true
         } catch {
             errors.append(error)
         }
@@ -169,11 +180,15 @@ final class WeatherService {
                 longitude: location.longitude,
                 latitude: location.latitude
             )
+            successfulRequests += 1
         } catch {
             errors.append(error)
         }
 
-        guard current != nil || !hourly.isEmpty || !minutely.isEmpty || !daily.isEmpty || airQuality != nil else {
+        guard successfulRequests > 0 else {
+            throw errors.first ?? WeatherServiceError.emptyResponse
+        }
+        guard receivedNoMinuteData || current != nil || !hourly.isEmpty || !minutely.isEmpty || !daily.isEmpty || airQuality != nil else {
             throw errors.first ?? WeatherServiceError.emptyResponse
         }
 
@@ -198,7 +213,7 @@ final class WeatherService {
     }
 
     private func fetchOpenMeteo(config: AppConfig, generation: Int) async -> Result<WeatherSnapshot, WeatherFetchError> {
-        let cached = loadCached()
+        let cached = loadCached(config: config.weather)
         guard let location = await resolveOpenMeteoLocation(config: config, cached: cached) else {
             return .failure(.setupRequired("Set a valid weather name or coordinates in GlancePane Settings"))
         }
@@ -232,6 +247,7 @@ final class WeatherService {
         var airQuality = cached?.airQuality
         var timeZoneIdentifier = cached?.timeZoneIdentifier
         var errors: [Error] = []
+        var successfulRequests = 0
         let attributionURL = cached?.attributionURL ?? Self.openMeteoAttributionURL
 
         do {
@@ -240,16 +256,21 @@ final class WeatherService {
             hourly = result.hourly
             daily = result.daily
             timeZoneIdentifier = result.timeZoneIdentifier
+            successfulRequests += 1
         } catch {
             errors.append(error)
         }
 
         do {
             airQuality = try await fetchOpenMeteoAirQuality(longitude: location.longitude, latitude: location.latitude)
+            successfulRequests += 1
         } catch {
             errors.append(error)
         }
 
+        guard successfulRequests > 0 else {
+            throw errors.first ?? WeatherServiceError.emptyResponse
+        }
         guard current != nil || !hourly.isEmpty || !daily.isEmpty || airQuality != nil else {
             throw errors.first ?? WeatherServiceError.emptyResponse
         }
