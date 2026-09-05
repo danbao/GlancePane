@@ -241,6 +241,9 @@ struct GlancePaneTestRunner {
             TestCase("window lifecycle waits while target display is unavailable") {
                 try testWindowLifecycleWaitsForTargetDisplay()
             },
+            TestCase("window lifecycle preserves startup recovery and blocks hidden input") {
+                try testWindowLifecyclePreservesStartupRecovery()
+            },
             TestCase("screen lock monitor maps Darwin state values") {
                 try testScreenLockMonitorStateMapping()
             },
@@ -2385,13 +2388,28 @@ private func testWindowLifecycleWaitsForTargetDisplay() throws {
     var state = DashboardWindowLifecycleState()
 
     try expectEqual(state.handle(.repositionRequested), [.repositionAndShow])
-    try expectEqual(state.handle(.targetUnavailable), [.hide])
+    try expectEqual(state.handle(.targetUnavailable), [.hidePreservingStartupRetries])
     try expect(state.hasPendingReposition, "missing target should keep reposition pending")
     try expect(!state.isWindowPresented, "missing target should not remain presented")
 
     try expectEqual(state.handle(.targetUnavailable), [])
     try expectEqual(state.handle(.repositionRequested), [.repositionAndShow])
     try expectEqual(state.handle(.repositionRequested), [.reposition])
+}
+
+private func testWindowLifecyclePreservesStartupRecovery() throws {
+    var state = DashboardWindowLifecycleState()
+
+    try expectEqual(state.handle(.repositionRequested), [.repositionAndShow])
+    try expect(state.acceptsPointerInput, "presentation attempts should enable input only while considered visible")
+    try expectEqual(state.handle(.targetUnavailable), [.hidePreservingStartupRetries])
+    try expect(state.hasPendingReposition, "a failed display attempt must leave recovery pending")
+    try expect(!state.acceptsPointerInput, "a hidden window must ignore pointer input")
+
+    try expectEqual(state.handle(.repositionRequested), [.repositionAndShow])
+    try expect(state.acceptsPointerInput, "a later successful retry should restore input")
+    try expectEqual(state.handle(.screensSlept), [.hide])
+    try expect(!state.acceptsPointerInput, "sleep must suspend pointer input")
 }
 
 private func testScreenLockMonitorStateMapping() throws {

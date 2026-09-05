@@ -126,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             updateClickShieldFrame()
             resumeClickShield()
             window.orderFront(nil)
+            cancelStartupDisplayRetries()
             Self.logger.notice(
                 "Dashboard shown on \(descriptor.name, privacy: .public) \(descriptor.logicalWidth)x\(descriptor.logicalHeight, privacy: .public) via \(reason.rawValue, privacy: .public)"
             )
@@ -216,7 +217,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for action in actions {
             switch action {
             case .hide:
-                suspendDashboardPresentation(reason: reason)
+                suspendDashboardPresentation(reason: reason, cancelStartupRetries: true)
+            case .hidePreservingStartupRetries:
+                suspendDashboardPresentation(reason: reason, cancelStartupRetries: false)
             case .reposition:
                 positionAndShowWindow()
             case .repositionAndShow:
@@ -225,8 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func suspendDashboardPresentation(reason: String) {
-        cancelStartupDisplayRetries()
+    private func suspendDashboardPresentation(reason: String, cancelStartupRetries: Bool) {
+        if cancelStartupRetries {
+            cancelStartupDisplayRetries()
+        }
         resetPageGestureState()
         clickShield?.stop()
         clickShieldUsesWindowFallback = false
@@ -611,6 +616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func scheduleStartupDisplayRetries() {
         cancelStartupDisplayRetries()
+        guard !windowLifecycle.isWindowPresented else { return }
         startupDisplayRetryTasks = [2, 5, 10].map { delay in
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
@@ -734,7 +740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func applyWindowInteraction() {
         guard let model = dashboardModel else { return }
-        guard windowLifecycle.canPresentWindow else {
+        guard windowLifecycle.acceptsPointerInput else {
             window?.ignoresMouseEvents = true
             return
         }
@@ -767,6 +773,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handlePageDragEvent(type: NSEvent.EventType, location: CGPoint) {
+        guard windowLifecycle.acceptsPointerInput else {
+            resetPageGestureState()
+            return
+        }
         if type != .mouseMoved,
            dashboardModel?.config.interaction.clickNavigationEnabled != true {
             dragStartLocation = nil

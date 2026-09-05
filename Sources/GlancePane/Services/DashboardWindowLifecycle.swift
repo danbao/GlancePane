@@ -12,6 +12,7 @@ enum DashboardWindowLifecycleEvent {
 
 enum DashboardWindowLifecycleAction: Equatable {
     case hide
+    case hidePreservingStartupRetries
     case reposition
     case repositionAndShow
 }
@@ -41,6 +42,10 @@ struct DashboardWindowLifecycleState {
         isSessionActive && areScreensAwake && !isScreenLocked
     }
 
+    var acceptsPointerInput: Bool {
+        canPresentWindow && isWindowPresented
+    }
+
     mutating func handle(_ event: DashboardWindowLifecycleEvent) -> [DashboardWindowLifecycleAction] {
         switch event {
         case .repositionRequested:
@@ -51,7 +56,7 @@ struct DashboardWindowLifecycleState {
             hasPendingReposition = true
             guard isWindowPresented else { return [] }
             isWindowPresented = false
-            return [.hide]
+            return [.hidePreservingStartupRetries]
 
         case .sessionResigned:
             isSessionActive = false
