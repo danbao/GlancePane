@@ -70,7 +70,7 @@ final class DashboardModel: ObservableObject {
         makeCodexUsageService = codexUsageServiceFactory
             ?? { CodexUsageService(cacheURL: configStore.codexUsageCacheURL) }
         quotes = self.stockService.loadCached(symbols: config.market.symbols)
-        weatherSnapshot = self.weatherService.loadCached() ?? .empty
+        weatherSnapshot = self.weatherService.loadCached(config: config.weather) ?? .empty
         if !quotes.isEmpty {
             stockStatus = .cached
         }
@@ -149,7 +149,7 @@ final class DashboardModel: ObservableObject {
         ensureCurrentPageIsVisible()
         recordActivity()
         quotes = stockService.loadCached(symbols: config.market.symbols)
-        weatherSnapshot = weatherService.loadCached() ?? .empty
+        weatherSnapshot = weatherService.loadCached(config: config.weather) ?? .empty
         if !config.market.enabled {
             stockStatus = .disabled
         }

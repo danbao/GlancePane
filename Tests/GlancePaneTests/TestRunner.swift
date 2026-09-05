@@ -115,6 +115,12 @@ struct GlancePaneTestRunner {
             TestCase("weather fetch keeps partial cached data") {
                 try await testWeatherFetchKeepsPartialCachedData()
             },
+            TestCase("weather complete failure preserves cache freshness") {
+                try await testWeatherCompleteFailurePreservesFreshness()
+            },
+            TestCase("weather config changes reject unrelated cache before and after failure") {
+                try await testWeatherConfigChangesRejectCache()
+            },
             TestCase("weather resumes after hiding an in-flight request") {
                 try await testWeatherResumesAfterHidingRequest()
             },
@@ -875,7 +881,7 @@ private func testWeatherCacheReadsCachedSnapshot() throws {
     try writeJSON(snapshot, to: store.weatherCacheURL)
 
     let service = WeatherService(cacheURL: store.weatherCacheURL)
-    let cached = service.loadCached()
+    let cached = service.loadCached(config: matchingWeatherConfig(snapshot))
 
     try expectEqual(cached?.isCached, true)
     try expectEqual(cached?.locationName, "Sample District")
@@ -895,7 +901,7 @@ private func testLegacyWeatherCacheRemainsReadable() throws {
     let legacyData = try JSONSerialization.data(withJSONObject: object)
     try legacyData.write(to: store.weatherCacheURL, options: [.atomic])
 
-    let cached = WeatherService(cacheURL: store.weatherCacheURL).loadCached()
+    let cached = WeatherService(cacheURL: store.weatherCacheURL).loadCached(config: matchingWeatherConfig(makeWeatherSnapshot()))
 
     try expectEqual(cached?.isCached, true)
     try expectEqual(cached?.daily, [])
@@ -2913,6 +2919,81 @@ private func testWeatherResumesAfterHidingRequest() async throws {
     try expectEqual(model.weatherSnapshot.current?.temperatureCelsius, 20)
 }
 
+private func testWeatherCompleteFailurePreservesFreshness() async throws {
+    setenv("GLANCEPANE_QWEATHER_JWT", "test-token", 1)
+    defer { unsetenv("GLANCEPANE_QWEATHER_JWT") }
+    for provider in [WeatherProvider.openMeteo, .qweather] {
+        let store = ConfigStore(configDirectoryURL: try makeTestDirectory("weather-all-failed"))
+        let original = makeCachedWeather(provider: provider)
+        try writeJSON(original, to: store.weatherCacheURL)
+        var config = AppConfig.default
+        config.weather.provider = provider
+        config.weather.location = WeatherLocationConfig(name: "", longitude: original.longitude, latitude: original.latitude)
+        config.weather.qweather.apiHost = "example.test"
+        let service = WeatherService(
+            cacheURL: store.weatherCacheURL,
+            client: MockHTTPClient { _ in throw URLError(.timedOut) },
+            now: { Date(timeIntervalSince1970: 2_000) }
+        )
+        let result = await service.fetch(config: config)
+        guard case .failure(.usingCache(let cached, _)) = result else {
+            throw TestFailure(message: "complete failure must report cached data for \(provider)", file: #fileID, line: #line)
+        }
+        try expectEqual(cached.updatedAt, original.updatedAt)
+        try expect(cached.isCached, "complete failure must keep the cache identity")
+        try expectEqual(service.loadCached(config: config.weather)?.updatedAt, original.updatedAt)
+    }
+}
+
+private func makeCachedWeather(provider: WeatherProvider = .openMeteo) -> WeatherSnapshot {
+    let base = makeWeatherSnapshot()
+    return WeatherSnapshot(
+        provider: provider, locationName: "Configured Location", locationID: nil,
+        longitude: 13.4, latitude: 52.5, timeZoneIdentifier: "UTC",
+        current: base.current, hourly: base.hourly, daily: base.daily,
+        minutely: [], precipitationSummary: "No minute rain data", airQuality: base.airQuality,
+        attributionURL: nil, updatedAt: Date(timeIntervalSince1970: 1_000),
+        isCached: false, errorMessage: nil
+    )
+}
+
+private func matchingWeatherConfig(_ snapshot: WeatherSnapshot) -> WeatherConfig {
+    var config = WeatherConfig.default
+    config.provider = snapshot.provider
+    config.location = WeatherLocationConfig(
+        name: snapshot.locationName, longitude: snapshot.longitude, latitude: snapshot.latitude
+    )
+    return config
+}
+
+@MainActor
+private func testWeatherConfigChangesRejectCache() async throws {
+    for changesProvider in [false, true] {
+        let store = ConfigStore(configDirectoryURL: try makeTestDirectory("weather-config-cache"))
+        try writeJSON(makeCachedWeather(), to: store.weatherCacheURL)
+        let client = MockHTTPClient { _ in throw URLError(.timedOut) }
+        let model = makeWeatherTestModel(store: store, client: client)
+        defer { model.stop() }
+        try expect(model.weatherSnapshot.current != nil, "matching cache should appear immediately")
+        var config = model.config
+        if changesProvider {
+            config.weather.provider = .qweather
+        } else {
+            config.weather.location.longitude = -74
+            config.weather.location.latitude = 40.7
+        }
+        model.apply(config: config)
+        try expectEqual(model.weatherSnapshot.current, nil)
+        try await eventually { model.weatherStatus == .offline || model.weatherStatus == .setup }
+        try expectEqual(model.weatherSnapshot.current, nil)
+        let restarted = DashboardModel(
+            config: config, configStore: store, displayManager: DisplayManager(),
+            weatherService: WeatherService(cacheURL: store.weatherCacheURL, client: client)
+        )
+        try expectEqual(restarted.weatherSnapshot.current, nil)
+    }
+}
+
 @MainActor
 private func testObsoleteWeatherCompletion() async throws {
     let store = ConfigStore(configDirectoryURL: try makeTestDirectory("weather-obsolete"))
@@ -2966,7 +3047,7 @@ private func testWeatherRestartProtectsCache() async throws {
     await client.completeForecast(1, temperature: 10)
     try await Task.sleep(nanoseconds: 50_000_000)
     try expectEqual(model.weatherSnapshot.current?.temperatureCelsius, 20)
-    let cached = WeatherService(cacheURL: store.weatherCacheURL).loadCached()
+    let cached = WeatherService(cacheURL: store.weatherCacheURL).loadCached(config: model.config.weather)
     try expectEqual(cached?.current?.temperatureCelsius, 20)
 }
 
