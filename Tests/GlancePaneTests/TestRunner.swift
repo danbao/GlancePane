@@ -42,7 +42,7 @@ struct GlancePaneTestRunner {
     static func main() async {
         exitAfterRelaunchPolicyChildCheckIfRequested()
 
-        let tests = [
+        var tests = [
             TestCase("default config writes grouped schema") {
                 try testDefaultConfigWritesGroupedSchema()
             },
@@ -304,10 +304,11 @@ struct GlancePaneTestRunner {
             TestCase("config reload ignores stale stock response") {
                 try await testConfigReloadIgnoresStaleStockResponse()
             },
-            TestCase("dashboard pages render at 1280x720") {
+            TestCase("dashboard page components render at 1280x720") {
                 try await testDashboardPageSnapshots()
             }
         ]
+        tests.append(contentsOf: dashboardCompositionTestCases())
 
         let filter = ProcessInfo.processInfo.environment["GLANCEPANE_TEST_FILTER"] ?? ""
         let selectedTests = tests.filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }
