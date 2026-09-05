@@ -275,7 +275,7 @@ struct GlancePaneTestRunner {
                 try testSMCAdapterDecodesCachesAndReconnects()
             },
             TestCase("thermal sampling throttles and reconnects after wake") {
-                try testThermalSamplingThrottlesAndReconnectsAfterWake()
+                try await testThermalSamplingThrottlesAndReconnectsAfterWake()
             },
             TestCase("settings and login item use live state") {
                 try await testSettingsAndLoginItemLiveState()
@@ -293,7 +293,10 @@ struct GlancePaneTestRunner {
                 try await testNetworkProbeIsInjectableAndOptional()
             },
             TestCase("disabled system metrics clear stale values") {
-                try testDisabledSystemMetricsClearStaleValues()
+                try await testDisabledSystemMetricsClearStaleValues()
+            },
+            TestCase("slow system sampling does not block UI and stale samples cannot publish") {
+                try await testSlowSystemSamplingDoesNotBlockUI()
             },
             TestCase("stock fetch preserves per-symbol cache") {
                 try await testStockFetchPreservesPerSymbolCache()
@@ -2648,7 +2651,7 @@ private func testSMCAdapterDecodesCachesAndReconnects() throws {
     try expect(!SMCSensorAdapter.isValidPower(0), "zero power should be rejected")
 }
 
-private func testThermalSamplingThrottlesAndReconnectsAfterWake() throws {
+private func testThermalSamplingThrottlesAndReconnectsAfterWake() async throws {
     var config = AppConfig.default
     config.system.enabledGroups = [.thermals]
     config.system.refreshIntervalsSeconds[.thermals] = 10
@@ -2658,15 +2661,15 @@ private func testThermalSamplingThrottlesAndReconnectsAfterWake() throws {
     let service = SystemMetricsService(thermalCollector: collector)
     let start = Date(timeIntervalSince1970: 1_000)
 
-    _ = service.sample(config: config, at: start)
-    _ = service.sample(config: config, at: start.addingTimeInterval(9))
+    _ = await service.sample(config: config, at: start)
+    _ = await service.sample(config: config, at: start.addingTimeInterval(9))
     try expectEqual(collector.sampleCallCount, 1)
 
-    _ = service.sample(config: config, at: start.addingTimeInterval(10))
+    _ = await service.sample(config: config, at: start.addingTimeInterval(10))
     try expectEqual(collector.sampleCallCount, 2)
 
-    service.handleSystemWake()
-    _ = service.sample(config: config, at: start.addingTimeInterval(11))
+    await service.handleSystemWake()
+    _ = await service.sample(config: config, at: start.addingTimeInterval(11))
     try expectEqual(collector.resetCallCount, 1)
     try expectEqual(collector.sampleCallCount, 3)
 }
@@ -2836,16 +2839,16 @@ private func testNetworkProbeIsInjectableAndOptional() async throws {
     try expectEqual(model.snapshot.network.latencyMilliseconds, 24)
 }
 
-private func testDisabledSystemMetricsClearStaleValues() throws {
+private func testDisabledSystemMetricsClearStaleValues() async throws {
     let service = SystemMetricsService()
     var config = AppConfig.default
-    let initial = service.sample(config: config, force: true)
+    let initial = await service.sample(config: config, force: true)
 
     try expectEqual(initial.state(for: .network).availability, .active)
     try expect(initial.storage.totalBytes > 0, "storage should contain a live sample")
 
     config.system.enabledGroups = [.vitals]
-    let disabled = service.sample(config: config, force: true)
+    let disabled = await service.sample(config: config, force: true)
 
     try expectEqual(disabled.state(for: .network), .disabled)
     try expectEqual(disabled.state(for: .storage), .disabled)
@@ -2853,6 +2856,45 @@ private func testDisabledSystemMetricsClearStaleValues() throws {
     try expectEqual(disabled.network, .empty)
     try expectEqual(disabled.storage, .empty)
     try expectEqual(disabled.power, .unavailable)
+}
+
+@MainActor
+private func testSlowSystemSamplingDoesNotBlockUI() async throws {
+    let store = ConfigStore(configDirectoryURL: try makeTestDirectory("slow-system-sampling"))
+    let sampler = ControlledSystemMetricsSampler()
+    var config = AppConfig.default
+    config.pages.enabled = [.clock, .system]
+    config.market.enabled = false
+    config.agents.codex.enabled = false
+    config.weather.location = .default
+    let model = DashboardModel(
+        config: config,
+        configStore: store,
+        displayManager: DisplayManager(),
+        metricsService: sampler
+    )
+    defer { model.stop() }
+
+    model.start()
+    try await eventually { await sampler.requestCount == 1 }
+    model.showNextPage()
+    try expectEqual(model.page, .system)
+
+    config.system.enabledGroups = []
+    config.system.processes.enabled = false
+    model.apply(config: config)
+    try await eventually { await sampler.requestCount == 2 }
+
+    var newest = SystemSnapshot.empty
+    newest.capturedAt = Date(timeIntervalSince1970: 2_000)
+    await sampler.completeRequest(at: 1, with: newest)
+    try await eventually { model.snapshot.capturedAt == newest.capturedAt }
+
+    var stale = SystemSnapshot.empty
+    stale.capturedAt = Date(timeIntervalSince1970: 1_000)
+    await sampler.completeRequest(at: 0, with: stale)
+    try await Task.sleep(nanoseconds: 50_000_000)
+    try expectEqual(model.snapshot.capturedAt, newest.capturedAt)
 }
 
 private func testStockFetchPreservesPerSymbolCache() async throws {
@@ -4041,6 +4083,26 @@ private func makeDryWeatherSnapshot() -> WeatherSnapshot {
         isCached: false,
         errorMessage: nil
     )
+}
+
+private actor ControlledSystemMetricsSampler: SystemMetricsSampling {
+    private var continuations: [CheckedContinuation<SystemSnapshot, Never>] = []
+
+    var requestCount: Int {
+        continuations.count
+    }
+
+    func sample(config: AppConfig, force: Bool, at now: Date) async -> SystemSnapshot {
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func handleSystemWake() async {}
+
+    func completeRequest(at index: Int, with snapshot: SystemSnapshot) {
+        continuations[index].resume(returning: snapshot)
+    }
 }
 
 private func expect(

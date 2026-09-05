@@ -1,6 +1,22 @@
 import Foundation
 
-final class SystemMetricsService {
+protocol SystemMetricsSampling: Sendable {
+    func sample(config: AppConfig, force: Bool, at now: Date) async -> SystemSnapshot
+    func handleSystemWake() async
+}
+
+extension SystemMetricsSampling {
+    func sample(config: AppConfig, force: Bool = false) async -> SystemSnapshot {
+        await sample(config: config, force: force, at: Date())
+    }
+
+    func sample(config: AppConfig, at now: Date) async -> SystemSnapshot {
+        await sample(config: config, force: false, at: now)
+    }
+}
+
+final class SystemMetricsService: SystemMetricsSampling, @unchecked Sendable {
+    private let queue = DispatchQueue(label: "dev.danbao.glancepane.system-metrics", qos: .utility)
     private let cpuCollector = CPUCollector()
     private let gpuCollector = GPUCollector()
     private let memoryCollector = MemoryCollector()
@@ -19,7 +35,25 @@ final class SystemMetricsService {
         self.thermalCollector = thermalCollector
     }
 
-    func sample(config: AppConfig, force: Bool = false, at now: Date = Date()) -> SystemSnapshot {
+    func sample(config: AppConfig, force: Bool, at now: Date) async -> SystemSnapshot {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                continuation.resume(returning: sampleLocked(config: config, force: force, at: now))
+            }
+        }
+    }
+
+    func handleSystemWake() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                thermalCollector.resetConnection()
+                lastRefresh[.thermals] = nil
+                continuation.resume()
+            }
+        }
+    }
+
+    private func sampleLocked(config: AppConfig, force: Bool, at now: Date) -> SystemSnapshot {
         var didRefresh = false
 
         if config.system.enabledGroups.contains(.vitals) {
@@ -120,11 +154,6 @@ final class SystemMetricsService {
             snapshot.capturedAt = now
         }
         return snapshot
-    }
-
-    func handleSystemWake() {
-        thermalCollector.resetConnection()
-        lastRefresh[.thermals] = nil
     }
 
     private func shouldRefresh(_ group: SystemMetricGroup, config: AppConfig, now: Date, force: Bool) -> Bool {
