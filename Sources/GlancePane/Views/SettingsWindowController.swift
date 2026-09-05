@@ -191,6 +191,7 @@ final class SettingsViewModel: ObservableObject {
         var next = config
         mutate(&next)
         next = next.normalized()
+        guard next != config else { return }
         config = next
         onConfigChange(next)
     }

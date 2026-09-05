@@ -1,9 +1,14 @@
 import AppKit
 import Foundation
 
+struct DashboardConfigEffects: Equatable {
+    var repositionWindow = false
+    var updateInteraction = false
+}
+
 @MainActor
 final class DashboardModel: ObservableObject {
-    @Published var config: AppConfig
+    @Published private(set) var config: AppConfig
     @Published private(set) var page: DashboardPage = .clock
     @Published private(set) var snapshot: SystemSnapshot = .empty
     @Published private(set) var history: SystemHistory = .empty
@@ -124,42 +129,74 @@ final class DashboardModel: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
-        stockTask?.cancel()
+        cancelStockRefresh()
         cancelWeatherRefresh()
-        networkProbeTask?.cancel()
+        cancelNetworkProbe()
         codexTask?.cancel()
-        stockTask = nil
-        networkProbeTask = nil
         codexTask = nil
-        stockRequestGeneration &+= 1
-        networkProbeGeneration &+= 1
         codexRequestGeneration &+= 1
-        isFetchingStocks = false
-        isProbingNetwork = false
         if let codexUsageService {
             Task { await codexUsageService.stop() }
         }
         codexUsageService = nil
     }
 
-    func apply(config newConfig: AppConfig) {
-        stop()
-        config = newConfig.normalized()
-        healthEvaluator.reset()
+    @discardableResult
+    func apply(config newConfig: AppConfig) -> DashboardConfigEffects {
+        let previous = config
+        let next = newConfig.normalized()
+        guard previous != next else { return DashboardConfigEffects() }
+        let effects = DashboardConfigEffects(
+            repositionWindow: previous.display != next.display,
+            updateInteraction: previous.interaction != next.interaction
+        )
+        config = next
         ensureCurrentPageIsVisible()
-        recordActivity()
-        quotes = stockService.loadCached(symbols: config.market.symbols)
-        weatherSnapshot = weatherService.loadCached(config: config.weather) ?? .empty
-        if !config.market.enabled {
-            stockStatus = .disabled
+        guard timer != nil else {
+            quotes = stockService.loadCached(symbols: config.market.symbols)
+            weatherSnapshot = weatherService.loadCached(config: config.weather) ?? .empty
+            start()
+            return effects
         }
-        if !config.pages.enabled.contains(.weather) {
-            weatherStatus = .hidden
+
+        if previous.market != config.market {
+            cancelStockRefresh()
+            lastStockRefresh = nil
+            quotes = stockService.loadCached(symbols: config.market.symbols)
+            refreshStocks(force: true)
         }
-        if !config.system.networkQuality.enabled {
+        if previous.weather != config.weather
+            || previous.pages.enabled.contains(.weather) != config.pages.enabled.contains(.weather) {
+            cancelWeatherRefresh()
+            lastWeatherRefresh = nil
+            weatherSnapshot = weatherService.loadCached(config: config.weather) ?? .empty
+            refreshWeather(force: true)
+        }
+        if previous.agents.codex != config.agents.codex
+            || previous.pages.enabled.contains(.agents) != config.pages.enabled.contains(.agents) {
+            restartCodexUsage()
+        }
+        if previous.system.networkQuality != config.system.networkQuality
+            || previous.system.enabledGroups.contains(.network) != config.system.enabledGroups.contains(.network) {
+            cancelNetworkProbe()
+            lastNetworkProbe = nil
             latestNetworkLatency = nil
+            snapshot.network.latencyMilliseconds = nil
+            refreshNetworkQuality(force: true)
         }
-        start()
+        if previous.system.thresholds != config.system.thresholds {
+            healthEvaluator.reset()
+        }
+        if previous.protection != config.protection {
+            resetBurnInProtectionDates()
+        }
+        if previous.pages.rotation != config.pages.rotation {
+            lastAutoPageRotationDate = Date()
+        }
+        if previous.system != config.system {
+            tick()
+        }
+        return effects
     }
 
     func updateDisplay(_ descriptor: DisplayDescriptor) {
@@ -299,9 +336,7 @@ final class DashboardModel: ObservableObject {
         let request = config.system.networkQuality
         guard request.enabled,
               config.system.enabledGroups.contains(.network) else {
-            networkProbeTask?.cancel()
-            networkProbeTask = nil
-            isProbingNetwork = false
+            cancelNetworkProbe()
             latestNetworkLatency = nil
             return
         }
@@ -385,6 +420,20 @@ final class DashboardModel: ObservableObject {
 
     private var stockRefreshInterval: TimeInterval {
         config.market.refreshIntervalSeconds
+    }
+
+    private func cancelStockRefresh() {
+        stockRequestGeneration &+= 1
+        stockTask?.cancel()
+        stockTask = nil
+        isFetchingStocks = false
+    }
+
+    private func cancelNetworkProbe() {
+        networkProbeGeneration &+= 1
+        networkProbeTask?.cancel()
+        networkProbeTask = nil
+        isProbingNetwork = false
     }
 
     private func refreshWeather(force: Bool) {
