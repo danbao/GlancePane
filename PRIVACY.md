@@ -10,6 +10,8 @@ GlancePane stores its state under `~/.glancepane/`:
 - `stock-cache.json` contains the most recent requested market quotes.
 - `weather-cache.json` contains the most recent requested weather response.
 - `codex-usage-cache.json` contains account-level token totals and rate-limit windows.
+- `watchdog-registration-version` contains the app build last used to register the watchdog login item.
+- `watchdog-registration-refresh-pending` temporarily records an interrupted watchdog registration refresh so it can be retried.
 
 The directory uses POSIX mode `0700`. Configuration, caches, backups, and exported configuration files use mode `0600`.
 

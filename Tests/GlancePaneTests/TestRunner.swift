@@ -281,7 +281,25 @@ struct GlancePaneTestRunner {
                 try await testSettingsAndLoginItemLiveState()
             },
             TestCase("login item migrates legacy main app registration") {
-                try testLoginItemMigratesLegacyRegistration()
+                try await testLoginItemMigratesLegacyRegistration()
+            },
+            TestCase("login item refreshes watchdog after app upgrade") {
+                try await testLoginItemRefreshesWatchdogAfterUpgrade()
+            },
+            TestCase("login item retries a transient watchdog refresh failure") {
+                try await testLoginItemRetriesTransientWatchdogRefreshFailure()
+            },
+            TestCase("login item does not record a failed watchdog refresh") {
+                try await testLoginItemDoesNotRecordFailedWatchdogRefresh()
+            },
+            TestCase("login item preserves current registration and user choice") {
+                try await testLoginItemPreservesCurrentRegistrationAndUserChoice()
+            },
+            TestCase("login item disable wins over an in-flight upgrade refresh") {
+                try await testLoginItemDisableWinsOverInFlightRefresh()
+            },
+            TestCase("login item re-enable wins over an in-flight upgrade refresh") {
+                try await testLoginItemReenableWinsOverInFlightRefresh()
             },
             TestCase("relaunch policy distinguishes quit from crash") {
                 try testRelaunchPolicySuppression()
@@ -2701,12 +2719,18 @@ private func testSettingsAndLoginItemLiveState() async throws {
 }
 
 @MainActor
-private func testLoginItemMigratesLegacyRegistration() throws {
+private func testLoginItemMigratesLegacyRegistration() async throws {
+    let directory = try makeTestDirectory("login-item-migration")
     let watchdog = MockAppService(status: .notRegistered)
     let legacy = MockAppService(status: .enabled)
-    let service = LoginItemService(watchdogService: watchdog, legacyMainAppService: legacy)
+    let service = LoginItemService(
+        watchdogService: watchdog,
+        legacyMainAppService: legacy,
+        registrationVersionURL: directory.appendingPathComponent("watchdog-version"),
+        currentBuildIdentifier: "0.4.0+11"
+    )
 
-    try service.prepareForLaunch()
+    try await service.prepareForLaunch()
 
     try expectEqual(watchdog.registerCalls, 1)
     try expectEqual(legacy.unregisterCalls, 1)
@@ -2723,11 +2747,269 @@ private func testLoginItemMigratesLegacyRegistration() throws {
     let retainedLegacy = MockAppService(status: .enabled)
     let approvalService = LoginItemService(
         watchdogService: awaitingApproval,
-        legacyMainAppService: retainedLegacy
+        legacyMainAppService: retainedLegacy,
+        registrationVersionURL: directory.appendingPathComponent("approval-version"),
+        currentBuildIdentifier: "0.4.0+11"
     )
-    try approvalService.prepareForLaunch()
+    try await approvalService.prepareForLaunch()
     try expectEqual(retainedLegacy.unregisterCalls, 0)
     try expectEqual(approvalService.status, .requiresApproval)
+    try expectEqual(
+        try String(contentsOf: directory.appendingPathComponent("approval-version"), encoding: .utf8),
+        "0.4.0+11"
+    )
+}
+
+@MainActor
+private func testLoginItemRefreshesWatchdogAfterUpgrade() async throws {
+    let directory = try makeTestDirectory("watchdog-upgrade")
+    let registrationVersionURL = directory.appendingPathComponent("watchdog-registration-version")
+    try SecureFileStore.write(Data("0.3.1+10".utf8), to: registrationVersionURL)
+
+    let watchdog = MockAppService(status: .enabled)
+    let legacy = MockAppService(status: .notRegistered)
+    let service = LoginItemService(
+        watchdogService: watchdog,
+        legacyMainAppService: legacy,
+        registrationVersionURL: registrationVersionURL,
+        currentBuildIdentifier: "0.4.0+11"
+    )
+
+    try await service.prepareForLaunch()
+
+    try expectEqual(watchdog.unregisterAndWaitCalls, 1)
+    try expectEqual(watchdog.registerCalls, 1)
+    try expectEqual(watchdog.appServiceStatus, .enabled)
+    try expectEqual(
+        try String(contentsOf: registrationVersionURL, encoding: .utf8),
+        "0.4.0+11"
+    )
+    try expectEqual(posixPermissions(at: registrationVersionURL), 0o600)
+}
+
+@MainActor
+private func testLoginItemRetriesTransientWatchdogRefreshFailure() async throws {
+    let directory = try makeTestDirectory("watchdog-upgrade-transient-failure")
+    let registrationVersionURL = directory.appendingPathComponent("watchdog-registration-version")
+    try SecureFileStore.write(Data("0.3.1+10".utf8), to: registrationVersionURL)
+
+    let watchdog = MockAppService(
+        status: .enabled,
+        statusAfterRegister: .enabled,
+        statusAfterRegisterQueue: [.notFound, .enabled]
+    )
+    let service = LoginItemService(
+        watchdogService: watchdog,
+        legacyMainAppService: MockAppService(status: .notRegistered),
+        registrationVersionURL: registrationVersionURL,
+        currentBuildIdentifier: "0.4.0+11",
+        registrationRetryDelaysNanoseconds: [0],
+        retrySleep: { _ in }
+    )
+
+    try await service.prepareForLaunch()
+
+    try expectEqual(watchdog.registerCalls, 2)
+    try expectEqual(service.status, .enabled)
+    try expectEqual(
+        try String(contentsOf: registrationVersionURL, encoding: .utf8),
+        "0.4.0+11"
+    )
+}
+
+@MainActor
+private func testLoginItemDoesNotRecordFailedWatchdogRefresh() async throws {
+    let directory = try makeTestDirectory("watchdog-upgrade-failure")
+    let registrationVersionURL = directory.appendingPathComponent("watchdog-registration-version")
+    try SecureFileStore.write(Data("0.3.1+10".utf8), to: registrationVersionURL)
+
+    let watchdog = MockAppService(status: .enabled, statusAfterRegister: .notFound)
+    let service = LoginItemService(
+        watchdogService: watchdog,
+        legacyMainAppService: MockAppService(status: .notRegistered),
+        registrationVersionURL: registrationVersionURL,
+        currentBuildIdentifier: "0.4.0+11",
+        registrationRetryDelaysNanoseconds: [0, 0],
+        retrySleep: { _ in }
+    )
+
+    var refreshFailed = false
+    do {
+        try await service.prepareForLaunch()
+    } catch {
+        refreshFailed = true
+    }
+
+    try expect(refreshFailed, "an unavailable watchdog registration should fail preparation")
+    try expectEqual(
+        try String(contentsOf: registrationVersionURL, encoding: .utf8),
+        "0.3.1+10"
+    )
+    let pendingURL = directory.appendingPathComponent(LoginItemService.refreshPendingFileName)
+    try expectEqual(
+        try String(contentsOf: pendingURL, encoding: .utf8),
+        "0.4.0+11"
+    )
+    try expectEqual(watchdog.registerCalls, 3)
+}
+
+@MainActor
+private func testLoginItemPreservesCurrentRegistrationAndUserChoice() async throws {
+    let directory = try makeTestDirectory("watchdog-registration-choice")
+    let currentVersionURL = directory.appendingPathComponent("current-version")
+    try SecureFileStore.write(Data("0.4.0+11".utf8), to: currentVersionURL)
+
+    let currentWatchdog = MockAppService(status: .enabled)
+    let currentService = LoginItemService(
+        watchdogService: currentWatchdog,
+        legacyMainAppService: MockAppService(status: .notRegistered),
+        registrationVersionURL: currentVersionURL,
+        currentBuildIdentifier: "0.4.0+11"
+    )
+    try await currentService.prepareForLaunch()
+    try expectEqual(currentWatchdog.unregisterCalls, 0)
+    try expectEqual(currentWatchdog.registerCalls, 0)
+
+    let disabledVersionURL = directory.appendingPathComponent("disabled-version")
+    try SecureFileStore.write(Data("0.3.1+10".utf8), to: disabledVersionURL)
+    let disabledWatchdog = MockAppService(status: .notRegistered)
+    let disabledService = LoginItemService(
+        watchdogService: disabledWatchdog,
+        legacyMainAppService: MockAppService(status: .notRegistered),
+        registrationVersionURL: disabledVersionURL,
+        currentBuildIdentifier: "0.4.0+11"
+    )
+
+    try await disabledService.prepareForLaunch()
+    try expectEqual(disabledWatchdog.registerCalls, 0)
+    try expectEqual(disabledService.status, .disabled)
+
+    try disabledService.setEnabled(false)
+    try expect(
+        !FileManager.default.fileExists(atPath: disabledVersionURL.path),
+        "disabling the watchdog should remove its registration version"
+    )
+
+    try disabledService.setEnabled(true)
+    try expectEqual(disabledWatchdog.registerCalls, 1)
+    try expectEqual(disabledService.status, .enabled)
+    try expectEqual(
+        try String(contentsOf: disabledVersionURL, encoding: .utf8),
+        "0.4.0+11"
+    )
+
+    let revokedVersionURL = directory.appendingPathComponent("revoked-version")
+    let revokedPendingURL = directory.appendingPathComponent("revoked-pending")
+    try SecureFileStore.write(Data("0.3.1+10".utf8), to: revokedVersionURL)
+    try SecureFileStore.write(Data("0.4.0+11".utf8), to: revokedPendingURL)
+    let revokedWatchdog = MockAppService(status: .requiresApproval)
+    let revokedService = LoginItemService(
+        watchdogService: revokedWatchdog,
+        legacyMainAppService: MockAppService(status: .notRegistered),
+        registrationVersionURL: revokedVersionURL,
+        refreshPendingURL: revokedPendingURL,
+        currentBuildIdentifier: "0.4.0+11"
+    )
+
+    try await revokedService.prepareForLaunch()
+    try expectEqual(revokedWatchdog.unregisterAndWaitCalls, 0)
+    try expectEqual(revokedWatchdog.registerCalls, 0)
+    try expectEqual(revokedService.status, .requiresApproval)
+    try expectEqual(
+        try String(contentsOf: revokedVersionURL, encoding: .utf8),
+        "0.3.1+10"
+    )
+    try expectEqual(
+        try String(contentsOf: revokedPendingURL, encoding: .utf8),
+        "0.4.0+11"
+    )
+}
+
+@MainActor
+private func testLoginItemDisableWinsOverInFlightRefresh() async throws {
+    let directory = try makeTestDirectory("watchdog-refresh-disable-race")
+    let registrationVersionURL = directory.appendingPathComponent("watchdog-registration-version")
+    let pendingURL = directory.appendingPathComponent("watchdog-registration-refresh-pending")
+    try SecureFileStore.write(Data("0.3.1+10".utf8), to: registrationVersionURL)
+
+    let watchdog = MockAppService(status: .enabled, suspendUnregisterAndWait: true)
+    let legacy = MockAppService(status: .enabled)
+    let service = LoginItemService(
+        watchdogService: watchdog,
+        legacyMainAppService: legacy,
+        registrationVersionURL: registrationVersionURL,
+        refreshPendingURL: pendingURL,
+        currentBuildIdentifier: "0.4.0+11"
+    )
+
+    let preparation = Task { @MainActor in
+        try await service.prepareForLaunch()
+    }
+    for _ in 0..<100 where !watchdog.hasPendingUnregister {
+        await Task.yield()
+    }
+    try expect(watchdog.hasPendingUnregister, "the upgrade refresh should be waiting for unregister")
+
+    try service.setEnabled(false)
+    watchdog.completePendingUnregister()
+    try await preparation.value
+
+    try expectEqual(watchdog.registerCalls, 0)
+    try expectEqual(legacy.unregisterCalls, 1)
+    try expectEqual(service.status, .disabled)
+    try expect(
+        !FileManager.default.fileExists(atPath: registrationVersionURL.path),
+        "an explicit disable should clear the stored registration version"
+    )
+    try expect(
+        !FileManager.default.fileExists(atPath: pendingURL.path),
+        "an explicit disable should clear the pending refresh"
+    )
+}
+
+@MainActor
+private func testLoginItemReenableWinsOverInFlightRefresh() async throws {
+    let directory = try makeTestDirectory("watchdog-refresh-reenable-race")
+    let registrationVersionURL = directory.appendingPathComponent("watchdog-registration-version")
+    let pendingURL = directory.appendingPathComponent("watchdog-registration-refresh-pending")
+    try SecureFileStore.write(Data("0.3.1+10".utf8), to: registrationVersionURL)
+
+    let watchdog = MockAppService(status: .enabled, suspendUnregisterAndWait: true)
+    let legacy = MockAppService(status: .enabled)
+    let service = LoginItemService(
+        watchdogService: watchdog,
+        legacyMainAppService: legacy,
+        registrationVersionURL: registrationVersionURL,
+        refreshPendingURL: pendingURL,
+        currentBuildIdentifier: "0.4.0+11",
+        registrationRetryDelaysNanoseconds: [0],
+        retrySleep: { _ in }
+    )
+
+    let preparation = Task { @MainActor in
+        try await service.prepareForLaunch()
+    }
+    for _ in 0..<100 where !watchdog.hasPendingUnregister {
+        await Task.yield()
+    }
+    try expect(watchdog.hasPendingUnregister, "the upgrade refresh should be waiting for unregister")
+
+    try service.setEnabled(false)
+    try service.setEnabled(true)
+    watchdog.completePendingUnregister()
+    try await preparation.value
+
+    try expectEqual(watchdog.registerCalls, 2)
+    try expectEqual(legacy.unregisterCalls, 1)
+    try expectEqual(service.status, .enabled)
+    try expectEqual(
+        try String(contentsOf: registrationVersionURL, encoding: .utf8),
+        "0.4.0+11"
+    )
+    try expect(
+        !FileManager.default.fileExists(atPath: pendingURL.path),
+        "the reconciled registration should clear the pending refresh"
+    )
 }
 
 private func testRelaunchPolicySuppression() throws {
@@ -3614,7 +3896,7 @@ private final class MockLoginItemService: LoginItemManaging {
         self.status = status
     }
 
-    func prepareForLaunch() throws {}
+    func prepareForLaunch() async throws {}
 
     func setEnabled(_ enabled: Bool) throws {
         setCalls.append(enabled)
@@ -3627,23 +3909,53 @@ private final class MockLoginItemService: LoginItemManaging {
 @MainActor
 private final class MockAppService: AppServiceControlling {
     var appServiceStatus: AppServiceStatus
-    let statusAfterRegister: AppServiceStatus
+    var statusAfterRegister: AppServiceStatus
     var registerCalls = 0
     var unregisterCalls = 0
+    var unregisterAndWaitCalls = 0
+    private let suspendUnregisterAndWait: Bool
+    private var unregisterContinuation: CheckedContinuation<Void, Never>?
+    private var statusAfterRegisterQueue: [AppServiceStatus]
 
-    init(status: AppServiceStatus, statusAfterRegister: AppServiceStatus = .enabled) {
+    var hasPendingUnregister: Bool { unregisterContinuation != nil }
+
+    init(
+        status: AppServiceStatus,
+        statusAfterRegister: AppServiceStatus = .enabled,
+        statusAfterRegisterQueue: [AppServiceStatus] = [],
+        suspendUnregisterAndWait: Bool = false
+    ) {
         appServiceStatus = status
         self.statusAfterRegister = statusAfterRegister
+        self.statusAfterRegisterQueue = statusAfterRegisterQueue
+        self.suspendUnregisterAndWait = suspendUnregisterAndWait
     }
 
     func registerService() throws {
         registerCalls += 1
-        appServiceStatus = statusAfterRegister
+        appServiceStatus = statusAfterRegisterQueue.isEmpty
+            ? statusAfterRegister
+            : statusAfterRegisterQueue.removeFirst()
     }
 
     func unregisterService() throws {
         unregisterCalls += 1
         appServiceStatus = .notRegistered
+    }
+
+    func unregisterServiceAndWait() async throws {
+        unregisterAndWaitCalls += 1
+        if suspendUnregisterAndWait {
+            await withCheckedContinuation { continuation in
+                unregisterContinuation = continuation
+            }
+        }
+        appServiceStatus = .notRegistered
+    }
+
+    func completePendingUnregister() {
+        unregisterContinuation?.resume(returning: ())
+        unregisterContinuation = nil
     }
 }
 
