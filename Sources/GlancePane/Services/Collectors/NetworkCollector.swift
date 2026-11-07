@@ -28,8 +28,9 @@ final class NetworkCollector {
     func sample() -> NetworkStats {
         let path = pathSnapshot()
         let primary = dynamicPrimaryInterface() ?? path.interfaceName
-        let ip = primary.flatMap { ipAddress(for: $0) }
-        let bytes = sampleSpeed(interface: primary)
+        let interfaceSample = sampleInterface(primary)
+        let ip = interfaceSample.ipAddress
+        let bytes = sampleSpeed(from: interfaceSample.bytes)
         let wifi = wifiDetails(for: primary)
 
         return NetworkStats(
@@ -111,55 +112,7 @@ final class NetworkCollector {
         )
     }
 
-    private func ipAddress(for interface: String) -> String? {
-        var addresses: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&addresses) == 0, let addresses else {
-            return nil
-        }
-        defer { freeifaddrs(addresses) }
-
-        var ipv4Addresses: [String] = []
-        var ipv6Addresses: [String] = []
-        var cursor: UnsafeMutablePointer<ifaddrs>? = addresses
-        while let current = cursor {
-            defer { cursor = current.pointee.ifa_next }
-
-            let item = current.pointee
-            guard let name = item.ifa_name,
-                  String(cString: name) == interface,
-                  let address = item.ifa_addr,
-                  address.pointee.sa_family == UInt8(AF_INET) || address.pointee.sa_family == UInt8(AF_INET6)
-            else {
-                continue
-            }
-
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            let result = getnameinfo(
-                address,
-                socklen_t(address.pointee.sa_len),
-                &host,
-                socklen_t(host.count),
-                nil,
-                0,
-                NI_NUMERICHOST
-            )
-            if result == 0 {
-                let value = String(cString: host)
-                if address.pointee.sa_family == UInt8(AF_INET) {
-                    if !value.hasPrefix("169.254.") {
-                        ipv4Addresses.append(value)
-                    }
-                } else if !value.hasPrefix("fe80:") && value != "::1" {
-                    ipv6Addresses.append(value)
-                }
-            }
-        }
-
-        return ipv4Addresses.first ?? ipv6Addresses.first
-    }
-
-    private func sampleSpeed(interface: String?) -> (down: Double, up: Double) {
-        let current = sampleBytes(interface: interface)
+    private func sampleSpeed(from current: NetworkByteSample) -> (down: Double, up: Double) {
         defer { previousSample = current }
 
         guard let previousSample,
@@ -179,46 +132,76 @@ final class NetworkCollector {
         return (Double(downDelta) / elapsed, Double(upDelta) / elapsed)
     }
 
-    private func sampleBytes(interface: String?) -> NetworkByteSample {
+    private func sampleInterface(_ interface: String?) -> (ipAddress: String?, bytes: NetworkByteSample) {
         var addresses: UnsafeMutablePointer<ifaddrs>?
         var received: UInt64 = 0
         var sent: UInt64 = 0
+        let capturedAt = Date()
 
         guard getifaddrs(&addresses) == 0, let addresses else {
-            return NetworkByteSample(interface: interface, received: 0, sent: 0, capturedAt: Date())
+            return (nil, NetworkByteSample(interface: interface, received: 0, sent: 0, capturedAt: capturedAt))
         }
-
         defer { freeifaddrs(addresses) }
 
+        var firstIPv4: String?
+        var firstIPv6: String?
         var cursor: UnsafeMutablePointer<ifaddrs>? = addresses
+
         while let current = cursor {
             defer { cursor = current.pointee.ifa_next }
 
             let item = current.pointee
-            guard let name = item.ifa_name,
-                  let address = item.ifa_addr,
-                  address.pointee.sa_family == UInt8(AF_LINK),
-                  let data = item.ifa_data
-            else {
+            guard let name = item.ifa_name, let address = item.ifa_addr else {
                 continue
             }
 
-            let interfaceName = String(cString: name)
-            if let interface, interfaceName != interface {
+            if let interface, String(cString: name) != interface {
                 continue
             }
 
-            let flags = Int32(item.ifa_flags)
-            guard (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 else {
-                continue
-            }
+            let family = address.pointee.sa_family
+            if family == UInt8(AF_LINK), let data = item.ifa_data {
+                let flags = Int32(item.ifa_flags)
+                guard (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 else {
+                    continue
+                }
+                let networkData = data.assumingMemoryBound(to: if_data.self).pointee
+                received += UInt64(networkData.ifi_ibytes)
+                sent += UInt64(networkData.ifi_obytes)
+            } else if interface != nil && (family == UInt8(AF_INET) || family == UInt8(AF_INET6)) {
+                if family == UInt8(AF_INET), firstIPv4 != nil {
+                    continue
+                }
+                if family == UInt8(AF_INET6), (firstIPv4 != nil || firstIPv6 != nil) {
+                    continue
+                }
 
-            let networkData = data.assumingMemoryBound(to: if_data.self).pointee
-            received += UInt64(networkData.ifi_ibytes)
-            sent += UInt64(networkData.ifi_obytes)
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                let result = getnameinfo(
+                    address,
+                    socklen_t(address.pointee.sa_len),
+                    &host,
+                    socklen_t(host.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                )
+                guard result == 0 else { continue }
+                let value = String(cString: host)
+                if family == UInt8(AF_INET) {
+                    if !value.hasPrefix("169.254.") {
+                        firstIPv4 = value
+                    }
+                } else if !value.hasPrefix("fe80:") && value != "::1" {
+                    firstIPv6 = value
+                }
+            }
         }
 
-        return NetworkByteSample(interface: interface, received: received, sent: sent, capturedAt: Date())
+        return (
+            firstIPv4 ?? firstIPv6,
+            NetworkByteSample(interface: interface, received: received, sent: sent, capturedAt: capturedAt)
+        )
     }
 }
 

@@ -2539,6 +2539,26 @@ private func testProcessCPUPercent() throws {
     try expectEqual(ProcessCollector.cpuPercent(current: 2_000_000_000, previous: nil, elapsedSeconds: 1), 0)
     try expectEqual(ProcessCollector.cpuPercent(current: 2_000_000_000, previous: 1_000_000_000, elapsedSeconds: 2), 50)
     try expectEqual(ProcessCollector.cpuPercent(current: 500, previous: 1_000, elapsedSeconds: 1), 0)
+
+    var nameLookups: [Int32] = []
+    var candidates = (1...100).map { pid in
+        ProcessCollector.Candidate(
+            pid: Int32(pid),
+            cpuPercent: Double(pid),
+            memoryBytes: UInt64(pid) * 1_024
+        )
+    }
+    // Add an exact tie at the top to verify alphabetical tie-breaking and caching.
+    candidates.append(ProcessCollector.Candidate(pid: 101, cpuPercent: 100, memoryBytes: 100 * 1_024))
+
+    let top = ProcessCollector.selectTopProcesses(candidates, limit: 5) { pid in
+        nameLookups.append(pid)
+        return pid == 101 ? "Alpha" : "Process-\(pid)"
+    }
+    try expectEqual(top.map(\.pid), [101, 100, 99, 98, 97])
+    try expectEqual(top.first?.name, "Alpha")
+    try expectEqual(Set(nameLookups), Set([101, 100, 99, 98, 97]))
+    try expectEqual(nameLookups.count, 5)
 }
 
 private func testMetricHistoryGapsAndTrimming() throws {

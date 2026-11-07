@@ -29,7 +29,7 @@ final class CPUCollector {
 
         let stateCount = Int(CPU_STATE_MAX)
         let tickCount = Int(cpuCount) * stateCount
-        let ticks = (0..<tickCount).map { cpuInfo[$0] }
+        let ticks = Array(UnsafeBufferPointer(start: cpuInfo, count: tickCount))
 
         guard let previousTicks, previousTicks.count == ticks.count else {
             self.previousTicks = ticks
@@ -56,6 +56,7 @@ final class CPUCollector {
         var niceTotal: Int64 = 0
         var idleTotal: Int64 = 0
         var perCore: [Double] = []
+        perCore.reserveCapacity(Int(cpuCount))
 
         for index in 0..<Int(cpuCount) {
             let base = index * stateCount
@@ -69,7 +70,8 @@ final class CPUCollector {
             systemTotal += system
             niceTotal += nice
             idleTotal += idle
-            perCore.append(coreTotal > 0 ? Double(user + system + nice) / Double(coreTotal) : 0)
+            let rawUsage = coreTotal > 0 ? Double(user + system + nice) / Double(coreTotal) : 0
+            perCore.append(min(max(rawUsage, 0), 1))
         }
 
         self.previousTicks = ticks
@@ -97,9 +99,8 @@ final class CPUCollector {
         let system = Double(systemTotal) / Double(total)
         let idle = Double(idleTotal) / Double(total)
 
-        let normalizedPerCore = perCore.map { min(max($0, 0), 1) }
         let groups = Self.coreGroups(
-            values: normalizedPerCore,
+            values: perCore,
             performanceCount: topology.performance,
             efficiencyCount: topology.efficiency
         )
@@ -109,7 +110,7 @@ final class CPUCollector {
             userUsage: min(max(user, 0), 1),
             systemUsage: min(max(system, 0), 1),
             idleUsage: min(max(idle, 0), 1),
-            perCoreUsage: normalizedPerCore,
+            perCoreUsage: perCore,
             performanceCoreUsage: groups.performance,
             efficiencyCoreUsage: groups.efficiency,
             unknownCoreUsage: groups.unknown
