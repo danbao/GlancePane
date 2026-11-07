@@ -360,18 +360,35 @@ func rain(_ value: Double?) -> String {
 }
 
 extension DateFormatter {
-    static func cached(format: String, timeZoneIdentifier: String? = nil) -> DateFormatter {
-        let key = "GlancePane.DateFormatter.\(format).\(timeZoneIdentifier ?? "local")" as NSString
+    static func cached(format: String, timeZone: TimeZone?) -> DateFormatter {
+        let tzKey = timeZone.map { "\($0.identifier)#\($0.secondsFromGMT())" } ?? "local"
+        let key = "GlancePane.DateFormatter.\(format).\(tzKey)" as NSString
         if let existing = Thread.current.threadDictionary[key] as? DateFormatter {
             return existing
         }
 
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        if let timeZoneIdentifier {
-            formatter.timeZone = TimeZone(identifier: timeZoneIdentifier)
+        if let timeZone {
+            formatter.timeZone = timeZone
         }
         formatter.dateFormat = format
+        Thread.current.threadDictionary[key] = formatter
+        return formatter
+    }
+
+    static func cached(format: String, timeZoneIdentifier: String? = nil) -> DateFormatter {
+        cached(format: format, timeZone: timeZoneIdentifier.flatMap(TimeZone.init(identifier:)))
+    }
+}
+
+extension ISO8601DateFormatter {
+    static func cached() -> ISO8601DateFormatter {
+        let key = "GlancePane.ISO8601DateFormatter.default" as NSString
+        if let existing = Thread.current.threadDictionary[key] as? ISO8601DateFormatter {
+            return existing
+        }
+        let formatter = ISO8601DateFormatter()
         Thread.current.threadDictionary[key] = formatter
         return formatter
     }

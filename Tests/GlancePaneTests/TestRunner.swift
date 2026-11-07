@@ -304,6 +304,9 @@ struct GlancePaneTestRunner {
             TestCase("config reload ignores stale stock response") {
                 try await testConfigReloadIgnoresStaleStockResponse()
             },
+            TestCase("weather endpoints fetch concurrently and cache date formatters") {
+                try await testWeatherConcurrentEndpointsAndFormatterCache()
+            },
             TestCase("dashboard page components render at 1280x720") {
                 try await testDashboardPageSnapshots()
             }
@@ -1585,6 +1588,7 @@ private func testOpenMeteoGeocodingSeparatesNamesAndCoordinates() async throws {
     let store = ConfigStore(configDirectoryURL: directory)
     var config = AppConfig.default
     config.weather.location = WeatherLocationConfig(name: "Berlin", longitude: nil, latitude: nil)
+    let lock = NSLock()
     var geocodingRequests = 0
     var geocodingReceivedName = false
     var dataEndpointsReceivedCoordinates = 0
@@ -1593,10 +1597,12 @@ private func testOpenMeteoGeocodingSeparatesNamesAndCoordinates() async throws {
         let query = request.url?.query ?? ""
         switch request.url?.host {
         case "geocoding-api.open-meteo.com":
-            geocodingRequests += 1
-            geocodingReceivedName = query.contains("name=Berlin")
-                && !query.contains("latitude=")
-                && !query.contains("longitude=")
+            lock.withLock {
+                geocodingRequests += 1
+                geocodingReceivedName = query.contains("name=Berlin")
+                    && !query.contains("latitude=")
+                    && !query.contains("longitude=")
+            }
             return try httpResponse(
                 for: request,
                 json: "{\"results\":[{\"id\":2950159,\"name\":\"Berlin canonical\",\"latitude\":52.52,\"longitude\":13.41}]}"
@@ -1605,7 +1611,7 @@ private func testOpenMeteoGeocodingSeparatesNamesAndCoordinates() async throws {
             if query.contains("latitude=52.52")
                 && query.contains("longitude=13.41")
                 && !query.contains("name=") {
-                dataEndpointsReceivedCoordinates += 1
+                lock.withLock { dataEndpointsReceivedCoordinates += 1 }
             }
             return try httpResponse(
                 for: request,
@@ -1615,7 +1621,7 @@ private func testOpenMeteoGeocodingSeparatesNamesAndCoordinates() async throws {
             if query.contains("latitude=52.52")
                 && query.contains("longitude=13.41")
                 && !query.contains("name=") {
-                dataEndpointsReceivedCoordinates += 1
+                lock.withLock { dataEndpointsReceivedCoordinates += 1 }
             }
             return try httpResponse(for: request, json: "{\"current\":{\"us_aqi\":35}}")
         default:
@@ -1833,6 +1839,58 @@ private func testQWeatherRejectsOpenMeteoCache() async throws {
         try expectEqual(snapshot.timeZoneIdentifier, nil)
     case .failure(let error):
         throw TestFailure(message: "QWeather should not inherit Open-Meteo cache, got \(error)", file: #fileID, line: #line)
+    }
+}
+
+private func testWeatherConcurrentEndpointsAndFormatterCache() async throws {
+    let tz = TimeZone(secondsFromGMT: 7200)
+    let firstFormatter = DateFormatter.cached(format: "yyyy-MM-dd'T'HH:mm", timeZone: tz)
+    let secondFormatter = DateFormatter.cached(format: "yyyy-MM-dd'T'HH:mm", timeZone: tz)
+    try expect(firstFormatter === secondFormatter, "DateFormatter.cached should reuse thread-local formatter instances")
+    try expect(ISO8601DateFormatter.cached() === ISO8601DateFormatter.cached(), "ISO8601DateFormatter.cached should reuse thread-local formatter instances")
+
+    let directory = try makeTestDirectory("weather-concurrent")
+    let store = ConfigStore(configDirectoryURL: directory)
+    var config = AppConfig.default
+    config.weather.location = WeatherLocationConfig(name: "", longitude: 13.41, latitude: 52.52)
+
+    let lock = NSLock()
+    var inFlight = 0
+    var maxConcurrentInFlight = 0
+
+    let client = MockHTTPClient { request in
+        lock.withLock {
+            inFlight += 1
+            if inFlight > maxConcurrentInFlight {
+                maxConcurrentInFlight = inFlight
+            }
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        lock.withLock {
+            inFlight -= 1
+        }
+        switch request.url?.host {
+        case "api.open-meteo.com":
+            return try httpResponse(
+                for: request,
+                json: "{\"timezone\":\"Europe/Berlin\",\"current\":{\"time\":\"2026-07-25T10:00\",\"temperature_2m\":22,\"weather_code\":0}}"
+            )
+        case "air-quality-api.open-meteo.com":
+            return try httpResponse(for: request, json: "{\"current\":{\"us_aqi\":30}}")
+        default:
+            throw URLError(.badURL)
+        }
+    }
+
+    let service = WeatherService(cacheURL: store.weatherCacheURL, client: client)
+    let result = await service.fetch(config: config)
+    switch result {
+    case .success(let snapshot):
+        try expectEqual(snapshot.current?.temperatureCelsius, 22)
+        try expectEqual(snapshot.airQuality?.aqi, 30)
+        try expectEqual(maxConcurrentInFlight, 2)
+    case .failure(let error):
+        throw TestFailure(message: "concurrent weather fetch should succeed, got \(error)", file: #fileID, line: #line)
     }
 }
 

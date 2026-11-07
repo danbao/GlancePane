@@ -745,26 +745,11 @@ private struct WeatherSetupPanel: View {
         }
     }
 
-    private var hasKeyID: Bool { hasValue(config.weather.qweather.keyID, environment: "GLANCEPANE_QWEATHER_KID") }
-    private var hasProjectID: Bool { hasValue(config.weather.qweather.projectID, environment: "GLANCEPANE_QWEATHER_PROJECT_ID") }
+    private var hasKeyID: Bool { !config.weather.qweather.effectiveKeyID.isEmpty }
+    private var hasProjectID: Bool { !config.weather.qweather.effectiveProjectID.isEmpty }
 
     private var hasPrivateKey: Bool {
-        let path = environmentValue("GLANCEPANE_QWEATHER_PRIVATE_KEY_PATH", fallback: config.weather.qweather.privateKeyPath)
-        return !path.isEmpty && FileManager.default.fileExists(atPath: expandedPath(path))
-    }
-
-    private func hasValue(_ value: String, environment: String) -> Bool {
-        !environmentValue(environment, fallback: value).isEmpty
-    }
-
-    private func environmentValue(_ name: String, fallback: String) -> String {
-        let value = ProcessInfo.processInfo.environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return value.isEmpty ? fallback.trimmingCharacters(in: .whitespacesAndNewlines) : value
-    }
-
-    private func expandedPath(_ path: String) -> String {
-        if path == "~" { return NSHomeDirectory() }
-        if path.hasPrefix("~/") { return NSHomeDirectory() + String(path.dropFirst()) }
-        return path
+        let path = config.weather.qweather.effectivePrivateKeyPath
+        return !path.isEmpty && FileManager.default.fileExists(atPath: config.weather.qweather.expandedPrivateKeyPath)
     }
 }
