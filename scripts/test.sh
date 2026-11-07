@@ -13,7 +13,11 @@ cd "${ROOT_DIR}"
 sh "scripts/build-icon.sh" "${BUILD_DIR}/AppIcon.icns" >/dev/null
 test -s "${BUILD_DIR}/AppIcon.icns"
 
+ARCH="${ARCH:-$(uname -m)}"
+MIN_MACOS_VERSION="14.0"
+
 swiftc \
+  -target "${ARCH}-apple-macosx${MIN_MACOS_VERSION}" \
   $(find "Sources/GlancePane" -name '*.swift' ! -name 'GlancePaneMain.swift' | sort) \
   $(find "Sources/GlancePaneWatchdog" -name '*.swift' ! -name 'main.swift' | sort) \
   $(find "Tests/GlancePaneTests" -name '*.swift' | sort) \

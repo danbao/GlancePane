@@ -1,6 +1,11 @@
 import Foundation
 import SwiftUI
 
+// CommandLineTools on macOS 27 ships SwiftUICore with `@attached macro State()`
+// without bundling `libSwiftUIMacros.dylib`. Aliasing the property wrapper struct
+// keeps `@ViewState` compiling across both CommandLineTools and full Xcode SDKs.
+typealias ViewState<Value> = SwiftUI.State<Value>
+
 enum DashboardLayout {
     static let referenceSize = CGSize(width: 1280, height: 720)
     static let panelCornerRadius: CGFloat = 8
