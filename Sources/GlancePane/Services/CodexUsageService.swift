@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 enum CodexExecutableResolver {
     static func executableURL(configuredPath: String?, fileManager: FileManager = .default) -> URL? {
@@ -36,6 +37,8 @@ enum CodexExecutableResolver {
 }
 
 actor CodexUsageService {
+    private static let logger = Logger(subsystem: "dev.danbao.glancepane", category: "CodexUsageService")
+
     typealias ClientFactory = (URL) -> CodexAccountFetching
     typealias ExecutableResolver = (String?, FileManager) -> URL?
 
@@ -219,7 +222,7 @@ actor CodexUsageService {
                 fileManager: fileManager
             )
         } catch {
-            NSLog("GlancePane failed to cache Codex usage: \(error)")
+            Self.logger.error("Failed to cache Codex usage: \(error.localizedDescription, privacy: .private)")
         }
     }
 }

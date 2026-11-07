@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import OSLog
 
 struct DashboardConfigEffects: Equatable {
     var repositionWindow = false
@@ -8,6 +9,8 @@ struct DashboardConfigEffects: Equatable {
 
 @MainActor
 final class DashboardModel: ObservableObject {
+    private static let logger = Logger(subsystem: "dev.danbao.glancepane", category: "DashboardModel")
+
     @Published private(set) var config: AppConfig
     @Published private(set) var page: DashboardPage = .clock
     @Published private(set) var snapshot: SystemSnapshot = .empty
@@ -333,8 +336,8 @@ final class DashboardModel: ObservableObject {
         lastActivityDate = now
         displayCycleStartDate = now
         restStartedAt = nil
-        isResting = false
-        dimOpacity = 0
+        setResting(false)
+        setDimOpacity(0)
     }
 
     private func tick(forceSystemMetrics: Bool = false) {
@@ -679,18 +682,18 @@ final class DashboardModel: ObservableObject {
         lastAutoPageRotationDate = now
         restStartedAt = nil
         pixelShiftStep = 0
-        isResting = false
-        dimOpacity = 0
-        contentOffset = .zero
+        setResting(false)
+        setDimOpacity(0)
+        setContentOffset(.zero)
     }
 
     private func updateBurnInProtection(now: Date) {
         let protection = config.protection
         guard protection.mode != .off else {
-            isResting = false
+            setResting(false)
             restStartedAt = nil
-            dimOpacity = 0
-            contentOffset = .zero
+            setDimOpacity(0)
+            setContentOffset(.zero)
             return
         }
 
@@ -703,7 +706,7 @@ final class DashboardModel: ObservableObject {
             if now.timeIntervalSince(restStartedAt) >= protection.rest.durationSeconds {
                 finishRest(at: now)
             } else {
-                dimOpacity = 1
+                setDimOpacity(1)
                 return
             }
         }
@@ -717,33 +720,33 @@ final class DashboardModel: ObservableObject {
         updatePixelShiftIfNeeded(now: now, protection: protection)
 
         if now.timeIntervalSince(lastActivityDate) >= protection.dim.afterSeconds {
-            dimOpacity = targetDimOpacity(for: protection)
+            setDimOpacity(targetDimOpacity(for: protection))
         } else {
-            dimOpacity = 0
+            setDimOpacity(0)
         }
     }
 
     private func enterRest(at now: Date) {
-        isResting = true
+        setResting(true)
         restStartedAt = now
-        dimOpacity = 1
-        NSLog("GlancePane burn-in protection entered rest")
+        setDimOpacity(1)
+        Self.logger.notice("Burn-in protection entered rest")
     }
 
     private func finishRest(at now: Date) {
         lastActivityDate = now
         displayCycleStartDate = now
         restStartedAt = nil
-        isResting = false
-        dimOpacity = 0
+        setResting(false)
+        setDimOpacity(0)
         lastPixelShiftDate = .distantPast
-        NSLog("GlancePane burn-in protection exited rest")
+        Self.logger.notice("Burn-in protection exited rest")
     }
 
     private func updatePixelShiftIfNeeded(now: Date, protection: ProtectionConfig) {
         let radius = pixelShiftRadius(for: protection)
         guard radius > 0 else {
-            contentOffset = .zero
+            setContentOffset(.zero)
             return
         }
 
@@ -753,7 +756,25 @@ final class DashboardModel: ObservableObject {
 
         pixelShiftStep += 1
         lastPixelShiftDate = now
-        contentOffset = Self.pixelShiftOffset(step: pixelShiftStep, radius: radius)
+        setContentOffset(Self.pixelShiftOffset(step: pixelShiftStep, radius: radius))
+    }
+
+    private func setResting(_ value: Bool) {
+        if isResting != value {
+            isResting = value
+        }
+    }
+
+    private func setDimOpacity(_ value: Double) {
+        if dimOpacity != value {
+            dimOpacity = value
+        }
+    }
+
+    private func setContentOffset(_ value: CGSize) {
+        if contentOffset != value {
+            contentOffset = value
+        }
     }
 
     private func pixelShiftRadius(for protection: ProtectionConfig) -> Double {

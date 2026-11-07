@@ -236,13 +236,28 @@ struct HistorySparkline: View {
                 context.stroke(grid, with: .color(.white.opacity(0.045)), lineWidth: 1)
             }
 
-            let values = (primary + secondary).compactMap { $0 }
-            let dynamicMaximum = max(values.max() ?? 0, 0.000_001) * 1.12
-            let maximum = max(fixedMaximum ?? dynamicMaximum, 0.000_001)
+            let maximum: Double
+            if let fixedMaximum {
+                maximum = max(fixedMaximum, 0.000_001)
+            } else {
+                let dynamicMaximum = max(Self.maxValue(in: primary, and: secondary), 0.000_001) * 1.12
+                maximum = max(dynamicMaximum, 0.000_001)
+            }
             draw(primary, color: primaryColor, maximum: maximum, count: count, context: &context, size: size)
             draw(secondary, color: secondaryColor, maximum: maximum, count: count, context: &context, size: size)
         }
         .accessibilityHidden(true)
+    }
+
+    private static func maxValue(in primary: [Double?], and secondary: [Double?]) -> Double {
+        var result = 0.0
+        for case let value? in primary where value > result {
+            result = value
+        }
+        for case let value? in secondary where value > result {
+            result = value
+        }
+        return result
     }
 
     private func draw(
