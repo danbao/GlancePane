@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Darwin
 import Foundation
 import SwiftUI
@@ -3195,6 +3196,19 @@ private func testAppearanceChangesPreserveRunningState() async throws {
     try expectEqual(model.weatherStatus, .live)
     try expectEqual(model.weatherSnapshot, previous)
     try expect(model.isResting, "appearance changes must preserve the rest period")
+
+    var changeEvents = 0
+    let cancellable = model.objectWillChange.sink { _ in changeEvents += 1 }
+    defer { _ = cancellable }
+
+    model.recordActivity(at: Date())
+    try expectEqual(model.isResting, false)
+    try expectEqual(model.dimOpacity, 0)
+    try expect(changeEvents > 0, "exiting rest should publish state changes")
+
+    changeEvents = 0
+    model.recordActivity(at: Date())
+    try expectEqual(changeEvents, 0)
 }
 
 @MainActor

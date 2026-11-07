@@ -1,6 +1,9 @@
 import Foundation
+import OSLog
 
 final class ConfigStore {
+    private static let logger = Logger(subsystem: "dev.danbao.glancepane", category: "ConfigStore")
+
     private let fileManager: FileManager
     private let homeDirectoryURL: URL
     let configDirectoryURL: URL
@@ -138,7 +141,7 @@ final class ConfigStore {
         do {
             try export(config, to: configURL)
         } catch {
-            NSLog("GlancePane failed to write config: \(error)")
+            Self.logger.error("Failed to write config: \(error.localizedDescription, privacy: .private)")
         }
     }
 
@@ -166,7 +169,7 @@ final class ConfigStore {
         do {
             try SecureFileStore.ensurePrivateDirectory(at: configDirectoryURL, fileManager: fileManager)
         } catch {
-            NSLog("GlancePane failed to create config directory: \(error)")
+            Self.logger.error("Failed to create config directory: \(error.localizedDescription, privacy: .private)")
         }
     }
 
@@ -207,7 +210,7 @@ final class ConfigStore {
         do {
             try SecureFileStore.copy(from: source, to: destination, fileManager: fileManager)
         } catch {
-            NSLog("GlancePane failed to migrate \(fileName): \(error)")
+            Self.logger.error("Failed to migrate \(fileName, privacy: .public): \(error.localizedDescription, privacy: .private)")
         }
     }
 
@@ -235,7 +238,7 @@ final class ConfigStore {
             migrated.weather.qweather.privateKeyPath = "~/.glancepane/qweather/ed25519-private.pem"
             return migrated
         } catch {
-            NSLog("GlancePane failed to migrate QWeather private key: \(error)")
+            Self.logger.error("Failed to migrate QWeather private key: \(error.localizedDescription, privacy: .private)")
             return config
         }
     }

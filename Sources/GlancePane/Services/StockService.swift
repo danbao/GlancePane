@@ -1,6 +1,9 @@
 import Foundation
+import OSLog
 
 final class StockService {
+    private static let logger = Logger(subsystem: "dev.danbao.glancepane", category: "StockService")
+
     private let cacheURL: URL
     private let client: HTTPClient
 
@@ -201,7 +204,7 @@ final class StockService {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try SecureFileStore.write(encoder.encode(snapshot), to: cacheURL)
         } catch {
-            NSLog("GlancePane failed to write stock cache: \(error)")
+            Self.logger.error("Failed to write stock cache: \(error.localizedDescription, privacy: .private)")
         }
     }
 }
