@@ -226,6 +226,38 @@ struct QWeatherConfig: Codable, Equatable {
         }
         return copy
     }
+
+    var effectiveKeyID: String {
+        Self.environmentValue("GLANCEPANE_QWEATHER_KID", fallback: keyID)
+    }
+
+    var effectiveProjectID: String {
+        Self.environmentValue("GLANCEPANE_QWEATHER_PROJECT_ID", fallback: projectID)
+    }
+
+    var effectivePrivateKeyPath: String {
+        Self.environmentValue("GLANCEPANE_QWEATHER_PRIVATE_KEY_PATH", fallback: privateKeyPath)
+    }
+
+    var expandedPrivateKeyPath: String {
+        Self.expandedPath(effectivePrivateKeyPath)
+    }
+
+    static func environmentValue(_ name: String, fallback: String) -> String {
+        let value = ProcessInfo.processInfo.environment[name]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? fallback.trimmingCharacters(in: .whitespacesAndNewlines) : value
+    }
+
+    static func expandedPath(_ path: String) -> String {
+        if path == "~" {
+            return NSHomeDirectory()
+        }
+        if path.hasPrefix("~/") {
+            return NSHomeDirectory() + String(path.dropFirst())
+        }
+        return path
+    }
 }
 
 enum WeatherProvider: String, Codable, CaseIterable, Equatable {

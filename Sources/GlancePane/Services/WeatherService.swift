@@ -131,57 +131,96 @@ final class WeatherService {
         var successfulRequests = 0
         var receivedNoMinuteData = false
 
-        do {
-            let result = try await fetchNow(apiHost: apiHost, jwt: jwt, location: location.weatherQuery)
+        async let nowTask: Result<(current: CurrentWeather, attributionURL: String?), Error> = {
+            do {
+                return .success(try await fetchNow(apiHost: apiHost, jwt: jwt, location: location.weatherQuery))
+            } catch {
+                return .failure(error)
+            }
+        }()
+        async let hourlyTask: Result<(hourly: [HourlyWeather], attributionURL: String?), Error> = {
+            do {
+                return .success(try await fetchHourly(apiHost: apiHost, jwt: jwt, location: location.weatherQuery))
+            } catch {
+                return .failure(error)
+            }
+        }()
+        async let dailyTask: Result<(daily: [DailyWeather], attributionURL: String?), Error> = {
+            do {
+                return .success(try await fetchDaily(apiHost: apiHost, jwt: jwt, location: location.weatherQuery))
+            } catch {
+                return .failure(error)
+            }
+        }()
+        async let minutelyTask: Result<(minutely: [MinutelyPrecipitation], summary: String, attributionURL: String?), Error> = {
+            do {
+                return .success(try await fetchMinutely(apiHost: apiHost, jwt: jwt, location: location.coordinateQuery))
+            } catch {
+                return .failure(error)
+            }
+        }()
+        async let airQualityTask: Result<AirQuality?, Error> = {
+            do {
+                return .success(
+                    try await fetchAirQuality(
+                        apiHost: apiHost,
+                        jwt: jwt,
+                        longitude: location.longitude,
+                        latitude: location.latitude
+                    )
+                )
+            } catch {
+                return .failure(error)
+            }
+        }()
+
+        switch await nowTask {
+        case .success(let result):
             current = result.current
             attributionURL = result.attributionURL ?? attributionURL
             successfulRequests += 1
-        } catch {
+        case .failure(let error):
             errors.append(error)
         }
 
-        do {
-            let result = try await fetchHourly(apiHost: apiHost, jwt: jwt, location: location.weatherQuery)
+        switch await hourlyTask {
+        case .success(let result):
             hourly = result.hourly
             attributionURL = result.attributionURL ?? attributionURL
             successfulRequests += 1
-        } catch {
+        case .failure(let error):
             errors.append(error)
         }
 
-        do {
-            let result = try await fetchDaily(apiHost: apiHost, jwt: jwt, location: location.weatherQuery)
+        switch await dailyTask {
+        case .success(let result):
             daily = result.daily
             attributionURL = result.attributionURL ?? attributionURL
             successfulRequests += 1
-        } catch {
+        case .failure(let error):
             errors.append(error)
         }
 
-        do {
-            let result = try await fetchMinutely(apiHost: apiHost, jwt: jwt, location: location.coordinateQuery)
+        switch await minutelyTask {
+        case .success(let result):
             minutely = result.minutely
             summary = result.summary
             attributionURL = result.attributionURL ?? attributionURL
             successfulRequests += 1
-        } catch WeatherServiceError.noData {
+        case .failure(WeatherServiceError.noData):
             minutely = []
             summary = "No minute rain data"
             successfulRequests += 1
             receivedNoMinuteData = true
-        } catch {
+        case .failure(let error):
             errors.append(error)
         }
 
-        do {
-            airQuality = try await fetchAirQuality(
-                apiHost: apiHost,
-                jwt: jwt,
-                longitude: location.longitude,
-                latitude: location.latitude
-            )
+        switch await airQualityTask {
+        case .success(let result):
+            airQuality = result
             successfulRequests += 1
-        } catch {
+        case .failure(let error):
             errors.append(error)
         }
 
@@ -250,21 +289,52 @@ final class WeatherService {
         var successfulRequests = 0
         let attributionURL = cached?.attributionURL ?? Self.openMeteoAttributionURL
 
-        do {
-            let result = try await fetchOpenMeteoForecast(longitude: location.longitude, latitude: location.latitude)
+        async let forecastTask: Result<(
+            current: CurrentWeather?,
+            hourly: [HourlyWeather],
+            daily: [DailyWeather],
+            timeZoneIdentifier: String?
+        ), Error> = {
+            do {
+                return .success(
+                    try await fetchOpenMeteoForecast(
+                        longitude: location.longitude,
+                        latitude: location.latitude
+                    )
+                )
+            } catch {
+                return .failure(error)
+            }
+        }()
+        async let airQualityTask: Result<AirQuality?, Error> = {
+            do {
+                return .success(
+                    try await fetchOpenMeteoAirQuality(
+                        longitude: location.longitude,
+                        latitude: location.latitude
+                    )
+                )
+            } catch {
+                return .failure(error)
+            }
+        }()
+
+        switch await forecastTask {
+        case .success(let result):
             current = result.current
             hourly = result.hourly
             daily = result.daily
             timeZoneIdentifier = result.timeZoneIdentifier
             successfulRequests += 1
-        } catch {
+        case .failure(let error):
             errors.append(error)
         }
 
-        do {
-            airQuality = try await fetchOpenMeteoAirQuality(longitude: location.longitude, latitude: location.latitude)
+        switch await airQualityTask {
+        case .success(let result):
+            airQuality = result
             successfulRequests += 1
-        } catch {
+        case .failure(let error):
             errors.append(error)
         }
 
@@ -408,11 +478,12 @@ final class WeatherService {
             built.reserveCapacity(times.count)
             for index in times.indices {
                 guard let forecastAt = Self.openMeteoDateValue(times[index], timeZone: timeZone) else { continue }
+                let weatherCode = Self.openMeteoValue(hourlyData.weather_code, at: index)
                 built.append(HourlyWeather(
                     forecastAt: forecastAt,
                     temperatureCelsius: Self.openMeteoValue(hourlyData.temperature_2m, at: index),
-                    condition: Self.wmoConditionText(Self.openMeteoValue(hourlyData.weather_code, at: index)),
-                    icon: Self.weatherCodeIcon(Self.openMeteoValue(hourlyData.weather_code, at: index)),
+                    condition: Self.wmoConditionText(weatherCode),
+                    icon: Self.weatherCodeIcon(weatherCode),
                     precipitationProbabilityPercent: Self.openMeteoValue(hourlyData.precipitation_probability, at: index),
                     precipitationMillimeters: Self.openMeteoValue(hourlyData.precipitation, at: index)
                 ))
@@ -432,12 +503,13 @@ final class WeatherService {
             built.reserveCapacity(times.count)
             for index in times.indices {
                 guard let date = Self.openMeteoDateValue(times[index], timeZone: timeZone) else { continue }
+                let weatherCode = Self.openMeteoValue(dailyData.weather_code, at: index)
                 built.append(DailyWeather(
                     date: date,
                     tempMax: Self.openMeteoValue(dailyData.temperature_2m_max, at: index),
                     tempMin: Self.openMeteoValue(dailyData.temperature_2m_min, at: index),
-                    condition: Self.wmoConditionText(Self.openMeteoValue(dailyData.weather_code, at: index)),
-                    icon: Self.weatherCodeIcon(Self.openMeteoValue(dailyData.weather_code, at: index)),
+                    condition: Self.wmoConditionText(weatherCode),
+                    icon: Self.weatherCodeIcon(weatherCode),
                     precipitationProbabilityPercent: Self.openMeteoValue(dailyData.precipitation_probability_max, at: index),
                     precipitationMillimeters: Self.openMeteoValue(dailyData.precipitation_sum, at: index)
                 ))
@@ -518,7 +590,7 @@ final class WeatherService {
         let lonText = String(format: "%.2f", longitude)
         let path = "/airquality/v1/current/\(latText)/\(lonText)"
 
-        let response = try await requestPathParams(
+        let response = try await request(
             QWeatherAirResponse.self,
             apiHost: apiHost,
             path: path,
@@ -746,40 +818,7 @@ final class WeatherService {
         queryItems: [URLQueryItem],
         jwt: String
     ) async throws -> T {
-        guard var components = URLComponents(string: normalizedAPIHost(apiHost)) else {
-            throw URLError(.badURL)
-        }
-
-        components.path = path
-        components.queryItems = queryItems
-
-        guard let url = components.url else {
-            throw URLError(.badURL)
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue(Self.authorizationHeader(jwt: jwt), forHTTPHeaderField: "Authorization")
-
-        try Task.checkCancellation()
-        let (data, response) = try await client.data(for: request)
-        try Task.checkCancellation()
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-
-        return try JSONDecoder().decode(type, from: data)
-    }
-
-    /// QWeather v1 air-quality API uses path params (lat/lon in path) and HTTP-status
-    /// error signalling (no top-level `code` field), unlike the v7 endpoints.
-    private func requestPathParams<T: Decodable>(
-        _ type: T.Type,
-        apiHost: String,
-        path: String,
-        queryItems: [URLQueryItem],
-        jwt: String
-    ) async throws -> T {
-        guard var components = URLComponents(string: normalizedAPIHost(apiHost)) else {
+        guard var components = URLComponents(string: Self.normalizedHost(apiHost)) else {
             throw URLError(.badURL)
         }
 
@@ -916,13 +955,6 @@ final class WeatherService {
         }
     }
 
-    private func normalizedAPIHost(_ apiHost: String) -> String {
-        if apiHost.hasPrefix("http://") || apiHost.hasPrefix("https://") {
-            return apiHost
-        }
-        return "https://\(apiHost)"
-    }
-
     private static let openMeteoForecastHost = "api.open-meteo.com"
     private static let openMeteoAirQualityHost = "air-quality-api.open-meteo.com"
     private static let openMeteoGeocodingHost = "geocoding-api.open-meteo.com"
@@ -952,17 +984,9 @@ final class WeatherService {
 
     private static func openMeteoDateValue(_ value: String?, timeZone: TimeZone) -> Date? {
         guard let value else { return nil }
-        return openMeteoDateFormatter(format: "yyyy-MM-dd'T'HH:mm", timeZone: timeZone).date(from: value)
-            ?? openMeteoDateFormatter(format: "yyyy-MM-dd", timeZone: timeZone).date(from: value)
-            ?? ISO8601DateFormatter().date(from: value)
-    }
-
-    private static func openMeteoDateFormatter(format: String, timeZone: TimeZone) -> DateFormatter {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = timeZone
-        formatter.dateFormat = format
-        return formatter
+        return DateFormatter.cached(format: "yyyy-MM-dd'T'HH:mm", timeZone: timeZone).date(from: value)
+            ?? DateFormatter.cached(format: "yyyy-MM-dd", timeZone: timeZone).date(from: value)
+            ?? ISO8601DateFormatter.cached().date(from: value)
     }
 
     private static func openMeteoValue(_ values: [Double?]?, at index: Int) -> Double? {
@@ -1053,17 +1077,17 @@ final class WeatherService {
             return environmentJWT
         }
 
-        let keyID = environmentValue("GLANCEPANE_QWEATHER_KID", fallback: config.weather.qweather.keyID)
+        let keyID = config.weather.qweather.effectiveKeyID
         guard !keyID.isEmpty else {
             throw WeatherServiceError.setupRequired("Set weather.qweather.keyID in ~/.glancepane/config.json")
         }
 
-        let projectID = environmentValue("GLANCEPANE_QWEATHER_PROJECT_ID", fallback: config.weather.qweather.projectID)
+        let projectID = config.weather.qweather.effectiveProjectID
         guard !projectID.isEmpty else {
             throw WeatherServiceError.setupRequired("Set weather.qweather.projectID in ~/.glancepane/config.json")
         }
 
-        let privateKeyPath = environmentValue("GLANCEPANE_QWEATHER_PRIVATE_KEY_PATH", fallback: config.weather.qweather.privateKeyPath)
+        let privateKeyPath = config.weather.qweather.effectivePrivateKeyPath
         guard !privateKeyPath.isEmpty else {
             throw WeatherServiceError.setupRequired("Set weather.qweather.privateKeyPath in ~/.glancepane/config.json")
         }
@@ -1124,7 +1148,7 @@ final class WeatherService {
     }
 
     private static func privateKeyRawRepresentation(at path: String) throws -> Data {
-        let url = URL(fileURLWithPath: expandedPath(path))
+        let url = URL(fileURLWithPath: QWeatherConfig.expandedPath(path))
         let pem = try String(contentsOf: url, encoding: .utf8)
         let base64 = pem
             .components(separatedBy: .newlines)
@@ -1161,25 +1185,6 @@ final class WeatherService {
         return nil
     }
 
-    private static func expandedPath(_ path: String) -> String {
-        if path == "~" {
-            return NSHomeDirectory()
-        }
-        if path.hasPrefix("~/") {
-            return NSHomeDirectory() + String(path.dropFirst())
-        }
-        return path
-    }
-
-    private static func environmentValue(_ name: String, fallback: String) -> String {
-        let environment = ProcessInfo.processInfo.environment[name]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !environment.isEmpty {
-            return environment
-        }
-        return fallback.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     private static func doubleValue(_ value: String?) -> Double? {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty,
@@ -1190,10 +1195,10 @@ final class WeatherService {
 
     private static func dateValue(_ value: String?) -> Date? {
         guard let value else { return nil }
-        return qweatherDateFormatter.date(from: value)
-            ?? qweatherDateTimeFormatter.date(from: value)
-            ?? qweatherDateOnlyFormatter.date(from: value)
-            ?? ISO8601DateFormatter().date(from: value)
+        return DateFormatter.cached(format: "yyyy-MM-dd'T'HH:mmXXXXX", timeZone: nil).date(from: value)
+            ?? DateFormatter.cached(format: "yyyy-MM-dd'T'HH:mm:ssXXXXX", timeZone: nil).date(from: value)
+            ?? DateFormatter.cached(format: "yyyy-MM-dd", timeZone: nil).date(from: value)
+            ?? ISO8601DateFormatter.cached().date(from: value)
     }
 
     private static func normalizedLocationName(_ value: String) -> String {
@@ -1205,27 +1210,6 @@ final class WeatherService {
             .replacingOccurrences(of: "县", with: "")
             .replacingOccurrences(of: " ", with: "")
     }
-
-    private static let qweatherDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd'T'HH:mmXXXXX"
-        return formatter
-    }()
-
-    private static let qweatherDateTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXXXX"
-        return formatter
-    }()
-
-    private static let qweatherDateOnlyFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
 }
 
 enum WeatherFetchError: Error, Equatable {
