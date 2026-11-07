@@ -247,7 +247,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 
 private struct SettingsView: View {
     @ObservedObject var model: SettingsViewModel
-    @State private var selection: SettingsSection? = .dashboard
+    @ViewState private var selection: SettingsSection? = .dashboard
 
     var body: some View {
         NavigationSplitView {

@@ -80,17 +80,18 @@ private struct HeroFlipDigitView: View {
     let height: CGFloat
     let seamRatio: CGFloat
 
-    @State private var displayedDigit: String
-    @State private var previousDigit: String
-    @State private var flipProgress = 1.0
+    @ViewState private var displayedDigit: String
+    @ViewState private var previousDigit: String
+    @ViewState private var flipProgress = 1.0
+    @ViewState private var flipTask: Task<Void, Never>?
 
     init(digit: String, width: CGFloat, height: CGFloat, seamRatio: CGFloat) {
         self.digit = digit
         self.width = width
         self.height = height
         self.seamRatio = seamRatio
-        _displayedDigit = State(initialValue: digit)
-        _previousDigit = State(initialValue: digit)
+        _displayedDigit = ViewState(initialValue: digit)
+        _previousDigit = ViewState(initialValue: digit)
     }
 
     var body: some View {
@@ -124,11 +125,16 @@ private struct HeroFlipDigitView: View {
         .onChange(of: digit) { _, newDigit in
             startFlip(to: newDigit)
         }
+        .onDisappear {
+            flipTask?.cancel()
+            flipTask = nil
+        }
     }
 
     private func startFlip(to newDigit: String) {
         guard newDigit != displayedDigit else { return }
 
+        flipTask?.cancel()
         previousDigit = displayedDigit
         displayedDigit = newDigit
         flipProgress = 0
@@ -137,7 +143,9 @@ private struct HeroFlipDigitView: View {
             flipProgress = 0.5
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+        flipTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.26)) {
                 flipProgress = 1
             }
